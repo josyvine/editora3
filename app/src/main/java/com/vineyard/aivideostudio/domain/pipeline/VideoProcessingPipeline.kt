@@ -460,7 +460,7 @@ class VideoProcessingPipeline(
 
             val liveResult = liveCommentatorManager.generateLiveCommentary(
                 scriptText = unifiedScript,
-                personaPrompt = "High energy commentary. Scream, shout, and react to highlights naturally.",
+                personaPrompt = "You are a professional studio voiceover narrator. Recite the following commentary clearly and fluently. Do not add conversational remarks.",
                 outputPcmFile = livePcmFile
             )
 
@@ -540,7 +540,7 @@ class VideoProcessingPipeline(
     /**
      * SCRIPT MODE (Direct Master Recipe Execution):
      * Executes when user supplies a Master Recipe JSON script.
-     * Evaluates cueMode ("single" or "multiple") and cueConcurrency (e.g. 10 at a time) dynamically from JSON.
+     * Evaluates voiceEngine ("live" or "tts"), cueMode ("single" or "multiple"), and concurrency dynamically.
      */
     private suspend fun executeMasterRecipePipeline(
         project: Project,
@@ -560,7 +560,8 @@ class VideoProcessingPipeline(
         var currentVideoUri = project.sourceUri
         val rawSourceDuration = project.metadata.durationSeconds
 
-        // Extract cue processing mode and concurrency from the JSON script
+        // Extract engine type, cue processing mode and concurrency from the JSON script
+        val effectiveVoiceEngine = recipe.voiceEngine ?: recipe.commentary.voiceEngine ?: "live"
         val effectiveCueMode = recipe.cueMode ?: recipe.commentary.cueMode ?: "single"
         val rawConcurrency = recipe.cueConcurrency ?: recipe.commentary.cueConcurrency ?: 1
         val effectiveConcurrency = if (effectiveCueMode.equals("multiple", ignoreCase = true)) {
@@ -709,7 +710,7 @@ class VideoProcessingPipeline(
         logger.log(
             projectId,
             PipelineStatus.TTS_GENERATION,
-            "Synthesizing Soundtrack: ${remappedCommentarySegments.size} cues | Mode=$effectiveCueMode (Concurrency=$effectiveConcurrency) | Voice=${recipe.commentary.voiceName ?: "Puck"} | Persona=${recipe.commentary.tone ?: "Default"}",
+            "Synthesizing Soundtrack: ${remappedCommentarySegments.size} cues | Engine=$effectiveVoiceEngine | Mode=$effectiveCueMode (Concurrency=$effectiveConcurrency) | Voice=${recipe.commentary.voiceName ?: "Puck"} | Persona=${recipe.commentary.tone ?: "Default"}",
             LogSeverity.INFO
         )
 
@@ -722,7 +723,8 @@ class VideoProcessingPipeline(
                 voiceName = recipe.commentary.voiceName,
                 outputM4aFile = commentaryAudioOutputFile,
                 cueMode = effectiveCueMode,
-                concurrency = effectiveConcurrency
+                concurrency = effectiveConcurrency,
+                voiceEngine = effectiveVoiceEngine
             )
         } else if (recipe.commentary.fullScript.isNotBlank()) {
             synthesizeSingleBlockCommentary(
@@ -730,7 +732,8 @@ class VideoProcessingPipeline(
                 script = recipe.commentary.fullScript,
                 tone = recipe.commentary.tone,
                 voiceName = recipe.commentary.voiceName,
-                outputM4aFile = commentaryAudioOutputFile
+                outputM4aFile = commentaryAudioOutputFile,
+                voiceEngine = effectiveVoiceEngine
             )
         } else {
             null
@@ -858,7 +861,7 @@ class VideoProcessingPipeline(
 
     /**
      * Synthesizes timestamped commentary cues with silence padding.
-     * Supports both "single" (sequential) and "multiple" (concurrent coroutines) modes based on JSON script.
+     * Supports both "live" (Unlimited Live API) and "tts" (REST TTS) engines.
      */
     private suspend fun synthesizeSegmentedCommentary(
         projectId: String,
@@ -867,7 +870,8 @@ class VideoProcessingPipeline(
         voiceName: String?,
         outputM4aFile: File,
         cueMode: String = "single",
-        concurrency: Int = 1
+        concurrency: Int = 1,
+        voiceEngine: String = "live"
     ): File? = withContext(Dispatchers.IO) {
         val sampleRate = 24_000
         val bytesPerSec = sampleRate * 2 // 16-bit mono = 48,000 bytes/second
@@ -877,7 +881,7 @@ class VideoProcessingPipeline(
         val isMultiple = cueMode.equals("multiple", ignoreCase = true) && concurrency > 1
 
         try {
-            // Step A: Synthesize cues (either in parallel via Coroutines+Semaphore or 1 by 1 sequentially)
+            // Step A: Synthesize cues (in parallel or sequentially) using the designated voiceEngine
             val segmentPcmFiles = if (isMultiple) {
                 val semaphore = Semaphore(concurrency)
                 val completedCount = AtomicInteger(0)
@@ -890,10 +894,10 @@ class VideoProcessingPipeline(
                                 logger.log(
                                     projectId,
                                     PipelineStatus.TTS_GENERATION,
-                                    "Synthesizing Cue $current/$totalCues [${String.format("%.1f", seg.start ?: 0.0)}s] (Parallel Queue): \"${seg.text.take(35)}...\"",
+                                    "Synthesizing Cue $current/$totalCues [${String.format("%.1f", seg.start ?: 0.0)}s] (Engine: $voiceEngine): \"${seg.text.take(35)}...\"",
                                     LogSeverity.INFO
                                 )
-                                synthesizeSingleCueToPcm(projectId, idx, seg, tone, voiceName)
+                                synthesizeSingleCueToPcm(projectId, idx, seg, tone, voiceName, voiceEngine)
                             }
                         }
                     }.awaitAll()
@@ -903,10 +907,10 @@ class VideoProcessingPipeline(
                     logger.log(
                         projectId,
                         PipelineStatus.TTS_GENERATION,
-                        "Synthesizing Cue ${idx + 1}/$totalCues [${String.format("%.1f", seg.start ?: 0.0)}s]: \"${seg.text.take(35)}...\"",
+                        "Synthesizing Cue ${idx + 1}/$totalCues [${String.format("%.1f", seg.start ?: 0.0)}s] (Engine: $voiceEngine): \"${seg.text.take(35)}...\"",
                         LogSeverity.INFO
                     )
-                    synthesizeSingleCueToPcm(projectId, idx, seg, tone, voiceName)
+                    synthesizeSingleCueToPcm(projectId, idx, seg, tone, voiceName, voiceEngine)
                 }
             }
 
@@ -962,40 +966,58 @@ class VideoProcessingPipeline(
     }
 
     /**
-     * Synthesizes an individual cue segment to a temporary PCM file.
+     * Synthesizes an individual cue segment to a temporary PCM file based on selected engine.
      */
     private suspend fun synthesizeSingleCueToPcm(
         projectId: String,
         idx: Int,
         seg: CommentarySegmentDto,
         tone: String?,
-        voiceName: String?
+        voiceName: String?,
+        voiceEngine: String = "live"
     ): File? {
-        val segPcmFile = storageManager.createAudioOutputFile(projectId, "seg_${idx}_raw.pcm")
-        val segTtsResult = liveCommentatorManager.generateLiveCommentary(
-            scriptText = seg.text,
-            personaPrompt = tone ?: "Professional clear studio voiceover.",
-            outputPcmFile = segPcmFile
-        )
+        val isLiveEngine = voiceEngine.equals("live", ignoreCase = true)
+        val selectedLiveModel = modelRepository.getSelectedModelForPurpose(ModelPurpose.LIVE_VOICE)
 
-        if (segTtsResult is AppResult.Success && segPcmFile.exists() && segPcmFile.length() > 0L) {
-            return segPcmFile
-        }
+        if (isLiveEngine) {
+            val segPcmFile = storageManager.createAudioOutputFile(projectId, "seg_${idx}_raw.pcm")
+            val verbatimPrompt = "You are a professional studio voiceover narrator. Recite the following script verbatim. Do not add any conversational remarks, introductions, or greetings. Tone: ${tone ?: "Clear professional narrator"}"
 
-        // Fallback REST TTS
-        val segFallbackPcm = storageManager.createAudioOutputFile(projectId, "seg_${idx}_fb.pcm")
-        val segM4a = storageManager.createAudioOutputFile(projectId, "seg_${idx}_fb.m4a")
-        val fbRes = ttsEngine.synthesizeSpeech(
-            TtsRequest(text = seg.text, voiceName = voiceName ?: "Puck", outputFilePath = segM4a.absolutePath)
-        )
-        if (fbRes.success && segM4a.exists()) {
-            audioExtractor.extractAudio(Uri.fromFile(segM4a), segFallbackPcm)
-            segM4a.delete()
-            if (segFallbackPcm.exists() && segFallbackPcm.length() > 0L) {
-                return segFallbackPcm
+            val segTtsResult = liveCommentatorManager.generateLiveCommentary(
+                scriptText = seg.text,
+                personaPrompt = verbatimPrompt,
+                outputPcmFile = segPcmFile,
+                modelId = selectedLiveModel
+            )
+
+            if (segTtsResult is AppResult.Success && segPcmFile.exists() && segPcmFile.length() > 0L) {
+                return segPcmFile
             }
+
+            // In Live mode, do NOT fall back to REST TTS to prevent hitting the 3 RPM / 10 RPD limit.
+            logger.log(
+                projectId,
+                PipelineStatus.TTS_GENERATION,
+                "Live Voice generation alert for Cue ${idx + 1}: ${if (segTtsResult is AppResult.Error) segTtsResult.error.message else "Incomplete stream"}",
+                LogSeverity.WARNING
+            )
+            return if (segPcmFile.exists() && segPcmFile.length() > 0L) segPcmFile else null
+        } else {
+            // REST TTS Engine explicitly requested
+            val segFallbackPcm = storageManager.createAudioOutputFile(projectId, "seg_${idx}_fb.pcm")
+            val segM4a = storageManager.createAudioOutputFile(projectId, "seg_${idx}_fb.m4a")
+            val fbRes = ttsEngine.synthesizeSpeech(
+                TtsRequest(text = seg.text, voiceName = voiceName ?: "Puck", outputFilePath = segM4a.absolutePath)
+            )
+            if (fbRes.success && segM4a.exists()) {
+                audioExtractor.extractAudio(Uri.fromFile(segM4a), segFallbackPcm)
+                segM4a.delete()
+                if (segFallbackPcm.exists() && segFallbackPcm.length() > 0L) {
+                    return segFallbackPcm
+                }
+            }
+            return null
         }
-        return null
     }
 
     private suspend fun synthesizeSingleBlockCommentary(
@@ -1003,27 +1025,37 @@ class VideoProcessingPipeline(
         script: String,
         tone: String?,
         voiceName: String?,
-        outputM4aFile: File
+        outputM4aFile: File,
+        voiceEngine: String = "live"
     ): File? {
-        val livePcmFile = storageManager.createAudioOutputFile(projectId, "commentary_live_raw.pcm")
-        val liveResult = liveCommentatorManager.generateLiveCommentary(
-            scriptText = script,
-            personaPrompt = tone ?: "Professional clear studio voiceover.",
-            outputPcmFile = livePcmFile
-        )
+        val isLiveEngine = voiceEngine.equals("live", ignoreCase = true)
+        val selectedLiveModel = modelRepository.getSelectedModelForPurpose(ModelPurpose.LIVE_VOICE)
 
-        if (liveResult is AppResult.Success && livePcmFile.exists() && livePcmFile.length() > 0L) {
-            val conversionResult = pcmToM4aConverter.convert(livePcmFile, outputM4aFile, 24_000)
-            livePcmFile.delete()
-            if (conversionResult is AppResult.Success) {
-                return outputM4aFile
+        if (isLiveEngine) {
+            val livePcmFile = storageManager.createAudioOutputFile(projectId, "commentary_live_raw.pcm")
+            val verbatimPrompt = "You are a professional studio voiceover narrator. Recite the following script verbatim. Do not add any conversational remarks, introductions, or greetings. Tone: ${tone ?: "Clear professional narrator"}"
+
+            val liveResult = liveCommentatorManager.generateLiveCommentary(
+                scriptText = script,
+                personaPrompt = verbatimPrompt,
+                outputPcmFile = livePcmFile,
+                modelId = selectedLiveModel
+            )
+
+            if (liveResult is AppResult.Success && livePcmFile.exists() && livePcmFile.length() > 0L) {
+                val conversionResult = pcmToM4aConverter.convert(livePcmFile, outputM4aFile, 24_000)
+                livePcmFile.delete()
+                if (conversionResult is AppResult.Success) {
+                    return outputM4aFile
+                }
             }
+            return null
+        } else {
+            val fallbackRes = ttsEngine.synthesizeSpeech(
+                TtsRequest(text = script, voiceName = voiceName ?: "Puck", outputFilePath = outputM4aFile.absolutePath)
+            )
+            return if (fallbackRes.success && outputM4aFile.exists()) outputM4aFile else null
         }
-
-        val fallbackRes = ttsEngine.synthesizeSpeech(
-            TtsRequest(text = script, voiceName = voiceName ?: "Puck", outputFilePath = outputM4aFile.absolutePath)
-        )
-        return if (fallbackRes.success && outputM4aFile.exists()) outputM4aFile else null
     }
 
     private suspend fun runQaCheck(
