@@ -34,12 +34,14 @@ import com.vineyard.aivideostudio.core.model.effects.BlurSpec
 import com.vineyard.aivideostudio.core.model.effects.ColorGradeSpec
 import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
 import com.vineyard.aivideostudio.core.model.effects.SpeedRampSpec
+import com.vineyard.aivideostudio.core.model.effects.TextCardSpec
 import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
 import com.vineyard.aivideostudio.core.result.AppError
 import com.vineyard.aivideostudio.core.result.AppResult
 import com.vineyard.aivideostudio.media.transformer.effects.BlurGlEffect
 import com.vineyard.aivideostudio.media.transformer.effects.ColorFilterGlEffect
 import com.vineyard.aivideostudio.media.transformer.overlays.DynamicGraphicsOverlay
+import com.vineyard.aivideostudio.media.transformer.overlays.TextCardOverlay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -183,6 +185,7 @@ class Media3TransformerEngine(private val context: Context) {
      * 1. Purges original copyrighted audio track from all video segments.
      * 2. Muxes synthesized TTS audio track as the sole soundtrack.
      * 3. Applies hardware-accelerated Speed Ramping, GPU Shaders, and dynamic Canvas Overlays.
+     * 4. Renders Presentation Text Cards (Instruction & Conclusion Slates).
      */
     suspend fun exportVideo(
         inputUri: Uri,
@@ -196,7 +199,8 @@ class Media3TransformerEngine(private val context: Context) {
         blurSpecs: List<BlurSpec> = emptyList(),
         replacementOverlays: List<ReplacementOverlaySpec> = emptyList(),
         colorGrade: ColorGradeSpec? = null,
-        trackingIndicators: List<TrackingIndicatorSpec> = emptyList()
+        trackingIndicators: List<TrackingIndicatorSpec> = emptyList(),
+        textCards: List<TextCardSpec> = emptyList()
     ): AppResult<File> = withContext(Dispatchers.Main) {
         outputFile.parentFile?.mkdirs()
         if (outputFile.exists()) outputFile.delete()
@@ -230,7 +234,7 @@ class Media3TransformerEngine(private val context: Context) {
             sharedVideoEffects.add(ColorFilterGlEffect(colorGrade))
         }
 
-        // 5. Overlays (Captions & Dynamic Graphics)
+        // 5. Overlays (Captions, Dynamic Graphics & Presentation Text Cards)
         val overlayList = mutableListOf<TextureOverlay>()
 
         if (captions.isNotEmpty()) {
@@ -239,6 +243,10 @@ class Media3TransformerEngine(private val context: Context) {
 
         if (replacementOverlays.isNotEmpty() || trackingIndicators.isNotEmpty()) {
             overlayList.add(DynamicGraphicsOverlay(replacementOverlays, trackingIndicators))
+        }
+
+        if (textCards.isNotEmpty()) {
+            overlayList.add(TextCardOverlay(textCards))
         }
 
         if (overlayList.isNotEmpty()) {
@@ -412,7 +420,6 @@ class Media3TransformerEngine(private val context: Context) {
                 exportException: ExportException
             ) {
                 if (continuation.isActive) {
-                    // Deep Unpack of Media3 Diagnostic Details & Stacktrace
                     val errorCode = exportException.errorCode
                     val errorCodeName = exportException.errorCodeName
                     val underlyingCause = exportException.cause?.message ?: "None"
