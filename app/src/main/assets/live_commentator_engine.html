@@ -52,7 +52,7 @@
 
     /**
      * Entry Point: Called by Android Kotlin via evaluateJavascript to start commentary generation.
-     * @param scriptText The commentary script containing emotional cue tags (e.g. [SCREAMING], [SHOUTING], [MOANING IN DISBELIEF]).
+     * @param scriptText The commentary script containing emotional cue tags (e.g. [INSTRUCTIVE], [EXPLAINING]).
      * @param personaPrompt The genre-conditioned director persona instructions.
      */
     window.startCommentarySession = function(scriptText, personaPrompt) {
@@ -101,7 +101,7 @@
           return;
         }
 
-        // Clean model prefix
+        // Clean and validate model prefix
         if (modelId.startsWith("models/")) {
           modelId = modelId.replace("models/", "");
         }
@@ -110,7 +110,7 @@
         }
 
         const endpointUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
-        logDiagnostic(`Opening WebSocket channel to model: ${modelId} with voice: ${voiceName}`, "NETWORK");
+        logDiagnostic(`Opening WebSocket channel to model: models/${modelId} with voice: ${voiceName}`, "NETWORK");
 
         liveWebSocket = new WebSocket(endpointUrl);
 
@@ -119,14 +119,13 @@
 
           let effectiveSystemInstruction = pendingPersonaPrompt;
           if (!effectiveSystemInstruction || effectiveSystemInstruction.trim() === "") {
-            effectiveSystemInstruction = "You are an electrifying, loud, unhinged live sports and viral video commentator. " +
-              "The original audio is completely purged. You MUST scream, shout, moan in disbelief, and deliver explosive hype for highlights! " +
-              "You must strictly vocalize and act out all bracketed stage directions like [SCREAMING], [LOUD SHOUT], [MOANING IN DISBELIEF], [LOUD ROAR] " +
-              "with your real voice volume, breath, and pitch. Never read the bracketed tags aloud.";
+            effectiveSystemInstruction = "You are a professional studio voiceover narrator. " +
+              "Your sole task is to vocalize the provided text verbatim with clear, natural pronunciation and cadence. " +
+              "Do not add conversational filler, greetings, pleasantries, or preamble. " +
+              "Do not read bracketed stage directions like [EXPLAINING] or [INSTRUCTIVE] aloud as words.";
           } else {
             effectiveSystemInstruction += " " +
-              "CRITICAL VOCAL DIRECTIVE: You must strictly act out and vocalize all bracketed emotional cues like [SCREAMING], [SHOUTING], [MOANING IN DISBELIEF], [LOUD ROAR] " +
-              "with your genuine voice volume and timbre. Do not read the bracketed cue tags aloud as words.";
+              "CRITICAL DIRECTIVE: Recite the text verbatim. Do not add any conversational remarks, introductions, or greetings. Never say 'Okay', 'Sure', or 'Here is the voiceover'.";
           }
 
           const setupPayload = {
@@ -168,13 +167,13 @@
             if (payload.setupComplete) {
               isConnectingSocket = false;
               isSessionConnected = true;
-              logDiagnostic("Handshake complete: Live Model ready to receive script.", "NETWORK");
+              logDiagnostic("Handshake complete: Live Model authenticated and ready to recite script.", "NETWORK");
 
               if (typeof window.AndroidInterface.onLiveSessionConnected === "function") {
                 window.AndroidInterface.onLiveSessionConnected();
               }
 
-              // Immediately dispatch the commentary script to trigger voice generation
+              // Immediately dispatch the commentary script turn to begin streaming audio
               dispatchCommentaryTurn();
               return;
             }
@@ -197,7 +196,7 @@
 
               if (serverContent.modelTurn && serverContent.modelTurn.parts) {
                 for (const part of serverContent.modelTurn.parts) {
-                  // Forward transcript text if returned
+                  // Forward transcript text if provided
                   if (part.text) {
                     accumulatedBotTranscript += part.text;
                     if (typeof window.AndroidInterface.onLiveCommentaryText === "function") {
@@ -219,7 +218,7 @@
 
               // 4. Model Turn Complete
               if (serverContent.turnComplete) {
-                logDiagnostic("Gemini Live server turn completed. Commentary audio stream finished.", "LIFECYCLE");
+                logDiagnostic("Gemini Live turn completed. Audio stream finished.", "LIFECYCLE");
 
                 if (!hasReceivedAudioChunks) {
                   logDiagnostic("Warning: Turn completed without receiving audio chunks.", "WARN");
@@ -229,7 +228,7 @@
                   window.AndroidInterface.onLiveCommentaryFinished();
                 }
 
-                // Close cleanly after turn completion
+                // Cleanly close connection
                 setTimeout(() => {
                   window.stopCommentarySession();
                 }, 500);
@@ -273,16 +272,16 @@
         return;
       }
 
-      logDiagnostic("Streaming commentary script to model with full vocal intensity directives...", "LIFECYCLE");
+      logDiagnostic("Dispatching verbatim script to Live model...", "LIFECYCLE");
 
       const promptPayload = {
         clientContent: {
           turns: [{
             role: "user",
             parts: [{
-              text: "Deliver this voiceover commentary performance immediately. " +
-                    "Act out all emotional cues: scream loudly, shout with full energy, moan in disbelief, and laugh naturally according to the bracketed directions. " +
-                    "Do NOT say 'Okay', 'Here is the commentary', or any greetings. Start the commentary performance immediately:\n\n" +
+              text: "CRITICAL: You are a professional voiceover narrator. Recite the following script verbatim. " +
+                    "Do NOT say 'Okay', 'Sure', or add any greeting or conversational filler. " +
+                    "Begin reciting the script immediately:\n\n" +
                     pendingScriptText
             }]
           }],
