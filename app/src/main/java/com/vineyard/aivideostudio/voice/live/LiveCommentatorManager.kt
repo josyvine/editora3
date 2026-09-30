@@ -12,10 +12,12 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import com.vineyard.aivideostudio.ai.model.ModelPurpose
 import com.vineyard.aivideostudio.core.common.DispatcherProvider
 import com.vineyard.aivideostudio.core.result.AppError
 import com.vineyard.aivideostudio.core.result.AppResult
 import com.vineyard.aivideostudio.data.preferences.Preferences
+import com.vineyard.aivideostudio.data.repository.ModelRepositoryImpl
 import com.vineyard.aivideostudio.processing.logger.ProcessingLogger
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
@@ -32,7 +34,8 @@ class LiveCommentatorManager(
     private val context: Context,
     private val preferences: Preferences,
     private val dispatcherProvider: DispatcherProvider,
-    private val logger: ProcessingLogger
+    private val logger: ProcessingLogger,
+    private var modelRepository: ModelRepositoryImpl? = null
 ) {
 
     companion object {
@@ -47,6 +50,11 @@ class LiveCommentatorManager(
     private var activeFileOutputStream: FileOutputStream? = null
     private var commentaryDeferred: CompletableDeferred<AppResult<File>>? = null
     private val isSessionActive = AtomicBoolean(false)
+    private var currentSessionModelId: String? = null
+
+    fun setModelRepository(repo: ModelRepositoryImpl) {
+        this.modelRepository = repo
+    }
 
     /**
      * Initializes the off-screen Headless WebView instance on the main UI thread.
@@ -160,20 +168,26 @@ class LiveCommentatorManager(
      * @param scriptText The commentary script containing emotional cue tags (e.g. [SCREAMING], [LOUD HYPE]).
      * @param personaPrompt The director persona instructions.
      * @param outputPcmFile Target file where raw 24kHz 16-bit mono Little-Endian PCM audio will be written.
+     * @param modelId Optional model override to ensure exact user-selected model from Settings is used.
      */
     suspend fun generateLiveCommentary(
         scriptText: String,
         personaPrompt: String,
-        outputPcmFile: File
+        outputPcmFile: File,
+        modelId: String? = null
     ): AppResult<File> = withContext(dispatcherProvider.io) {
+        currentSessionModelId = modelId
+
         if (!isWebViewReady.get() || webView == null) {
             val initResult = initialize()
             if (initResult is AppResult.Error) {
+                currentSessionModelId = null
                 return@withContext AppResult.Error(initResult.error)
             }
         }
 
         if (isSessionActive.getAndSet(true)) {
+            currentSessionModelId = null
             return@withContext AppResult.Error(AppError.MediaProcessingError("A live commentary session is already active."))
         }
 
@@ -187,6 +201,7 @@ class LiveCommentatorManager(
             activeFileOutputStream = FileOutputStream(outputPcmFile, false)
         } catch (e: Exception) {
             isSessionActive.set(false)
+            currentSessionModelId = null
             return@withContext AppResult.Error(AppError.StorageError("Cannot create output PCM file: ${e.message}"))
         }
 
@@ -210,6 +225,7 @@ class LiveCommentatorManager(
         }
 
         isSessionActive.set(false)
+        currentSessionModelId = null
         return@withContext result
     }
 
@@ -316,12 +332,22 @@ class LiveCommentatorManager(
     }
 
     private fun fetchModelIdSync(): String {
+        // 1. Session-level model override if provided
+        currentSessionModelId?.let { if (it.isNotBlank()) return it }
+
         return kotlinx.coroutines.runBlocking(dispatcherProvider.io) {
             try {
+                // 2. Read dynamically configured model from Room database (set via Settings dropdown)
+                val repoModel = modelRepository?.getSelectedModelForPurpose(ModelPurpose.LIVE_VOICE)
+                if (!repoModel.isNullOrBlank()) {
+                    return@runBlocking repoModel
+                }
+
+                // 3. Check preferences flow
                 val configuredModel = preferences.selectedLiveModel.first()
-                if (configuredModel.isNotBlank()) configuredModel else "gemini-2.5-flash-native-audio-dialog"
+                if (configuredModel.isNotBlank()) configuredModel else ""
             } catch (_: Exception) {
-                "gemini-2.5-flash-native-audio-dialog"
+                ""
             }
         }
     }
