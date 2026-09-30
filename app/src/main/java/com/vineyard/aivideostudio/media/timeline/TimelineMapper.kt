@@ -256,11 +256,16 @@ object TimelineMapper {
     ): List<TrackingIndicatorSpec> {
         return indicators.map { indicator ->
             val newStartMs = if (indicator.startTimeMs > 0L) timelineMap.mapOriginalToCurrentMs(indicator.startTimeMs) else 0L
-            val newEndMs = if (indicator.endTimeMs < Long.MAX_VALUE) timelineMap.mapOriginalToCurrentMs(indicator.endTimeMs) else Long.MAX_VALUE
-
-            val remappedKeyframes = indicator.keyframes.map { kf ->
-                kf.copy(timeMs = timelineMap.mapOriginalToCurrentMs(kf.timeMs))
+            val newEndMs = if (indicator.endTimeMs < Long.MAX_VALUE) {
+                timelineMap.mapOriginalToCurrentMs(indicator.endTimeMs).coerceAtLeast(newStartMs + 300L)
+            } else {
+                Long.MAX_VALUE
             }
+
+            val remappedKeyframes = indicator.keyframes
+                .map { kf -> kf.copy(timeMs = timelineMap.mapOriginalToCurrentMs(kf.timeMs)) }
+                .sortedBy { it.timeMs }
+
             indicator.copy(
                 startTimeMs = newStartMs,
                 endTimeMs = newEndMs,
