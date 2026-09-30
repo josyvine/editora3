@@ -10,6 +10,7 @@ import com.vineyard.aivideostudio.core.model.TimelineMap
 import com.vineyard.aivideostudio.core.model.TimelineSegment
 import com.vineyard.aivideostudio.core.model.effects.BlurSpec
 import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
+import com.vineyard.aivideostudio.core.model.effects.TextCardSpec
 import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
 
 object TimelineMapper {
@@ -154,6 +155,24 @@ object TimelineMapper {
     }
 
     /**
+     * Remaps instruction and conclusion text cards to match accelerated video timing.
+     */
+    fun remapTextCards(
+        timelineMap: TimelineMap,
+        cards: List<TextCardSpec>
+    ): List<TextCardSpec> {
+        return cards.map { card ->
+            val newStartMs = timelineMap.mapOriginalToCurrentMs(card.startTimeMs)
+            val newEndMs = timelineMap.mapOriginalToCurrentMs(card.endTimeMs).coerceAtLeast(newStartMs + 500L)
+
+            card.copy(
+                startTimeMs = newStartMs,
+                endTimeMs = newEndMs
+            )
+        }
+    }
+
+    /**
      * Remaps all commentary cue start and end timestamps from the raw video timeline
      * to the compressed timeline (taking speed play and highlight cuts into account).
      */
@@ -229,17 +248,24 @@ object TimelineMapper {
     }
 
     /**
-     * Remaps motion tracking keyframes (sports red box / flashing arrows).
+     * Remaps motion tracking keyframes, stationary button locks, and spotlight callouts.
      */
     fun remapTrackingIndicators(
         timelineMap: TimelineMap,
         indicators: List<TrackingIndicatorSpec>
     ): List<TrackingIndicatorSpec> {
         return indicators.map { indicator ->
+            val newStartMs = if (indicator.startTimeMs > 0L) timelineMap.mapOriginalToCurrentMs(indicator.startTimeMs) else 0L
+            val newEndMs = if (indicator.endTimeMs < Long.MAX_VALUE) timelineMap.mapOriginalToCurrentMs(indicator.endTimeMs) else Long.MAX_VALUE
+
             val remappedKeyframes = indicator.keyframes.map { kf ->
                 kf.copy(timeMs = timelineMap.mapOriginalToCurrentMs(kf.timeMs))
             }
-            indicator.copy(keyframes = remappedKeyframes)
+            indicator.copy(
+                startTimeMs = newStartMs,
+                endTimeMs = newEndMs,
+                keyframes = remappedKeyframes
+            )
         }
     }
 
