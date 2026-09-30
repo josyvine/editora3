@@ -13,6 +13,7 @@ import android.util.Base64
 import androidx.annotation.OptIn
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.effect.BitmapOverlay
+import com.vineyard.aivideostudio.core.model.effects.ArrowDirection
 import com.vineyard.aivideostudio.core.model.effects.OverlayType
 import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
 import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
@@ -24,8 +25,10 @@ import kotlin.math.sin
 /**
  * High-performance Media3 BitmapOverlay engine for:
  * 1. 1:1 Brand / Watermark Cover & Emoji/Logo Replacement.
- * 2. Sports Tracking Bounding Boxes (Keyframe Interpolated).
- * 3. Animated Flashing Pointing Arrows & Spotlight Highlights.
+ * 2. Multi-Directional Pointing Arrows (UP, DOWN, LEFT, RIGHT).
+ * 3. UI Button Callouts (Corner Brackets & Pulsating Highlights).
+ * 4. Sports Motion Tracking & Full-Height Person Column Pillars.
+ * 5. Spotlight Background Dimming.
  */
 @OptIn(UnstableApi::class)
 class DynamicGraphicsOverlay(
@@ -35,7 +38,6 @@ class DynamicGraphicsOverlay(
     private val targetHeight: Int = 1920
 ) : BitmapOverlay() {
 
-    // Cached paints to prevent allocations during 60fps frame rendering
     private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
     }
@@ -69,7 +71,7 @@ class DynamicGraphicsOverlay(
         // 1. Render 1:1 Brand / Watermark Replacements & Emojis
         renderReplacements(canvas, currentTimeMs, width, height)
 
-        // 2. Render Sports Tracking Boxes & Flashing Arrows
+        // 2. Render Pointing Arrows, Button Highlights, Tracking Pillars & Spotlights
         renderTrackingIndicators(canvas, currentTimeMs, width, height)
 
         return frameBitmap
@@ -110,7 +112,7 @@ class DynamicGraphicsOverlay(
                 }
 
                 OverlayType.EMOJI -> {
-                    // Draw opaque concealment background pill first
+                    // Opaque concealment background pill
                     fillPaint.color = Color.BLACK
                     fillPaint.alpha = 230
                     val cornerRadius = (rect.height() * 0.25f).coerceAtMost(20f)
@@ -130,7 +132,6 @@ class DynamicGraphicsOverlay(
                         fillPaint.alpha = (spec.opacity * 255).toInt().coerceIn(0, 255)
                         canvas.drawBitmap(bitmap, null, rect, fillPaint)
                     } else {
-                        // Fallback placeholder badge
                         fillPaint.color = Color.DKGRAY
                         canvas.drawRoundRect(rect, 8f, 8f, fillPaint)
                     }
@@ -148,19 +149,31 @@ class DynamicGraphicsOverlay(
         canvasHeight: Float
     ) {
         for (indicator in trackingIndicators) {
-            val currentFrame = interpolateKeyframe(indicator.keyframes, currentTimeMs) ?: continue
+            // Check active time window
+            val isWithinWindow = currentTimeMs in indicator.startTimeMs..indicator.endTimeMs
+            if (!isWithinWindow) continue
 
-            val centerX = currentFrame.x * canvasWidth
-            val centerY = currentFrame.y * canvasHeight
-            val boxWidth = currentFrame.width * canvasWidth
-            val boxHeight = currentFrame.height * canvasHeight
+            // Determine target bounding rectangle (Motion Keyframe OR Static UI Bounds)
+            val rect: RectF = if (indicator.staticBounds != null) {
+                RectF(
+                    indicator.staticBounds.left * canvasWidth,
+                    indicator.staticBounds.top * canvasHeight,
+                    indicator.staticBounds.right * canvasWidth,
+                    indicator.staticBounds.bottom * canvasHeight
+                )
+            } else {
+                val currentFrame = interpolateKeyframe(indicator.keyframes, currentTimeMs) ?: continue
+                val cx = currentFrame.x * canvasWidth
+                val cy = currentFrame.y * canvasHeight
+                val bw = currentFrame.width * canvasWidth
+                val bh = currentFrame.height * canvasHeight
+                RectF(cx - (bw / 2f), cy - (bh / 2f), cx + (bw / 2f), cy + (bh / 2f))
+            }
 
-            val rect = RectF(
-                centerX - (boxWidth / 2f),
-                centerY - (boxHeight / 2f),
-                centerX + (boxWidth / 2f),
-                centerY + (boxHeight / 2f)
-            )
+            // 1. Spotlight Dimming (Darkens background around target element)
+            if (indicator.dimBackgroundOpacity > 0f) {
+                renderBackgroundDimming(canvas, rect, canvasWidth, canvasHeight, indicator.dimBackgroundOpacity)
+            }
 
             val baseColor = try {
                 Color.parseColor(indicator.colorHex)
@@ -169,6 +182,39 @@ class DynamicGraphicsOverlay(
             }
 
             when (indicator.style) {
+                TrackingStyle.BUTTON_HIGHLIGHT -> {
+                    // Pulsating corner brackets for stationary UI buttons (e.g. "Copy" icon)
+                    val pulse = (sin(currentTimeMs * 0.010) * 0.5 + 0.5).toFloat()
+                    strokePaint.color = baseColor
+                    strokePaint.strokeWidth = indicator.strokeWidthPx + (pulse * 2f)
+                    strokePaint.alpha = (180 + (pulse * 75)).toInt().coerceIn(0, 255)
+
+                    val pad = 8f + (pulse * 4f)
+                    val bracketRect = RectF(rect.left - pad, rect.top - pad, rect.right + pad, rect.bottom + pad)
+                    drawCornerBrackets(canvas, bracketRect, strokePaint)
+
+                    indicator.label?.let { label ->
+                        drawLabelBadge(canvas, label, bracketRect.centerX(), bracketRect.top - 8f)
+                    }
+                }
+
+                TrackingStyle.VERTICAL_COLUMN -> {
+                    // Full-height person / athlete framing pillar
+                    strokePaint.color = baseColor
+                    strokePaint.strokeWidth = indicator.strokeWidthPx
+                    val pillarRect = RectF(rect.left, 40f, rect.right, canvasHeight - 40f)
+                    canvas.drawRoundRect(pillarRect, 24f, 24f, strokePaint)
+
+                    indicator.label?.let { label ->
+                        drawLabelBadge(canvas, label, pillarRect.centerX(), pillarRect.top + 60f)
+                    }
+                }
+
+                TrackingStyle.FLASHING_ARROW -> {
+                    // Multi-Directional Pointing Arrow (UP, DOWN, LEFT, RIGHT)
+                    renderDirectionalArrow(canvas, rect, indicator.arrowDirection, baseColor, currentTimeMs)
+                }
+
                 TrackingStyle.RED_BOX -> {
                     strokePaint.color = baseColor
                     strokePaint.strokeWidth = indicator.strokeWidthPx
@@ -182,38 +228,110 @@ class DynamicGraphicsOverlay(
                 TrackingStyle.HIGHLIGHT_CIRCLE -> {
                     strokePaint.color = baseColor
                     strokePaint.strokeWidth = indicator.strokeWidthPx
-                    val radius = (boxWidth.coerceAtLeast(boxHeight) / 2f)
-                    canvas.drawCircle(centerX, centerY, radius, strokePaint)
-                }
-
-                TrackingStyle.FLASHING_ARROW -> {
-                    val pulse = (sin(currentTimeMs * 0.012) * 0.5 + 0.5).toFloat()
-                    val bounceOffset = pulse * 18f
-
-                    fillPaint.color = baseColor
-                    fillPaint.alpha = (160 + (pulse * 95)).toInt().coerceIn(0, 255)
-
-                    val tipX = centerX
-                    val tipY = rect.top - 12f + bounceOffset
-                    val arrowWidth = 36f
-                    val arrowHeight = 44f
-
-                    arrowPath.reset()
-                    arrowPath.moveTo(tipX, tipY)
-                    arrowPath.lineTo(tipX - (arrowWidth / 2f), tipY - arrowHeight)
-                    arrowPath.lineTo(tipX + (arrowWidth / 2f), tipY - arrowHeight)
-                    arrowPath.close()
-
-                    canvas.drawPath(arrowPath, fillPaint)
+                    val radius = (rect.width().coerceAtLeast(rect.height()) / 2f) + 6f
+                    canvas.drawCircle(rect.centerX(), rect.centerY(), radius, strokePaint)
                 }
 
                 TrackingStyle.SPOTLIGHT -> {
                     fillPaint.color = baseColor
-                    fillPaint.alpha = 40
+                    fillPaint.alpha = 50
                     canvas.drawOval(rect, fillPaint)
                 }
             }
         }
+    }
+
+    private fun renderDirectionalArrow(
+        canvas: Canvas,
+        targetRect: RectF,
+        direction: ArrowDirection,
+        color: Int,
+        currentTimeMs: Long
+    ) {
+        val pulse = (sin(currentTimeMs * 0.012) * 0.5 + 0.5).toFloat()
+        val bounceOffset = pulse * 18f
+
+        fillPaint.color = color
+        fillPaint.alpha = (170 + (pulse * 85)).toInt().coerceIn(0, 255)
+
+        val arrowWidth = 36f
+        val arrowLength = 48f
+        arrowPath.reset()
+
+        when (direction) {
+            ArrowDirection.DOWN -> {
+                // Points down at top edge of target
+                val tipX = targetRect.centerX()
+                val tipY = targetRect.top - 12f + bounceOffset
+                arrowPath.moveTo(tipX, tipY)
+                arrowPath.lineTo(tipX - (arrowWidth / 2f), tipY - arrowLength)
+                arrowPath.lineTo(tipX + (arrowWidth / 2f), tipY - arrowLength)
+            }
+            ArrowDirection.UP -> {
+                // Points up at bottom edge of target
+                val tipX = targetRect.centerX()
+                val tipY = targetRect.bottom + 12f - bounceOffset
+                arrowPath.moveTo(tipX, tipY)
+                arrowPath.lineTo(tipX - (arrowWidth / 2f), tipY + arrowLength)
+                arrowPath.lineTo(tipX + (arrowWidth / 2f), tipY + arrowLength)
+            }
+            ArrowDirection.RIGHT -> {
+                // Points right at left edge of target
+                val tipX = targetRect.left - 12f + bounceOffset
+                val tipY = targetRect.centerY()
+                arrowPath.moveTo(tipX, tipY)
+                arrowPath.lineTo(tipX - arrowLength, tipY - (arrowWidth / 2f))
+                arrowPath.lineTo(tipX - arrowLength, tipY + (arrowWidth / 2f))
+            }
+            ArrowDirection.LEFT -> {
+                // Points left at right edge of target
+                val tipX = targetRect.right + 12f - bounceOffset
+                val tipY = targetRect.centerY()
+                arrowPath.moveTo(tipX, tipY)
+                arrowPath.lineTo(tipX + arrowLength, tipY - (arrowWidth / 2f))
+                arrowPath.lineTo(tipX + arrowLength, tipY + (arrowWidth / 2f))
+            }
+        }
+
+        arrowPath.close()
+        canvas.drawPath(arrowPath, fillPaint)
+    }
+
+    private fun drawCornerBrackets(canvas: Canvas, r: RectF, paint: Paint) {
+        val len = minOf(r.width(), r.height()) * 0.28f
+
+        // Top-Left
+        canvas.drawLine(r.left, r.top, r.left + len, r.top, paint)
+        canvas.drawLine(r.left, r.top, r.left, r.top + len, paint)
+
+        // Top-Right
+        canvas.drawLine(r.right, r.top, r.right - len, r.top, paint)
+        canvas.drawLine(r.right, r.top, r.right, r.top + len, paint)
+
+        // Bottom-Left
+        canvas.drawLine(r.left, r.bottom, r.left + len, r.bottom, paint)
+        canvas.drawLine(r.left, r.bottom, r.left, r.bottom - len, paint)
+
+        // Bottom-Right
+        canvas.drawLine(r.right, r.bottom, r.right - len, r.bottom, paint)
+        canvas.drawLine(r.right, r.bottom, r.right, r.bottom - len, paint)
+    }
+
+    private fun renderBackgroundDimming(
+        canvas: Canvas,
+        cutoutRect: RectF,
+        canvasWidth: Float,
+        canvasHeight: Float,
+        dimOpacity: Float
+    ) {
+        fillPaint.color = Color.BLACK
+        fillPaint.alpha = (dimOpacity.coerceIn(0.0f, 1.0f) * 255).toInt()
+
+        // Draw 4 rectangles around the cutout region (zero hardware layer allocations)
+        canvas.drawRect(0f, 0f, canvasWidth, cutoutRect.top, fillPaint)                               // Top
+        canvas.drawRect(0f, cutoutRect.bottom, canvasWidth, canvasHeight, fillPaint)                  // Bottom
+        canvas.drawRect(0f, cutoutRect.top, cutoutRect.left, cutoutRect.bottom, fillPaint)           // Left
+        canvas.drawRect(cutoutRect.right, cutoutRect.top, canvasWidth, cutoutRect.bottom, fillPaint) // Right
     }
 
     private fun drawLabelBadge(canvas: Canvas, label: String, centerX: Float, bottomY: Float) {
