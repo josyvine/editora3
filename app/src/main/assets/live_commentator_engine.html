@@ -52,6 +52,8 @@
 
     /**
      * Entry Point: Called by Android Kotlin via evaluateJavascript to start commentary generation.
+     * Reuses open WebSocket session if available for immediate sub-second voice synthesis.
+     *
      * @param scriptText The commentary script containing emotional cue tags (e.g. [INSTRUCTIVE], [EXPLAINING]).
      * @param personaPrompt The genre-conditioned director persona instructions.
      */
@@ -68,16 +70,27 @@
       accumulatedBotTranscript = "";
       hasReceivedAudioChunks = false;
 
-      initiateLiveWebSocket();
+      // PERSISTENT CONNECTION: Reuse open WebSocket for zero-delay cue execution
+      if (liveWebSocket && liveWebSocket.readyState === WebSocket.OPEN && isSessionConnected) {
+        logDiagnostic("Reusing persistent WebSocket session for cue (Zero Handshake Delay).", "NETWORK");
+        dispatchCommentaryTurn();
+      } else {
+        initiateLiveWebSocket();
+      }
     };
 
     /**
      * Connects to the Gemini Live BidiGenerateContent WebSocket endpoint.
      */
     function initiateLiveWebSocket() {
-      if (isConnectingSocket || isSessionConnected) {
-        logDiagnostic("Closing existing live session before re-establishing...", "NETWORK");
-        window.stopCommentarySession();
+      if (isConnectingSocket) {
+        logDiagnostic("WebSocket connection already in progress. Awaiting handshake...", "NETWORK");
+        return;
+      }
+
+      if (liveWebSocket && liveWebSocket.readyState === WebSocket.OPEN && isSessionConnected) {
+        dispatchCommentaryTurn();
+        return;
       }
 
       isConnectingSocket = true;
@@ -110,7 +123,7 @@
         }
 
         const endpointUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
-        logDiagnostic(`Opening WebSocket channel to model: models/${modelId} with voice: ${voiceName}`, "NETWORK");
+        logDiagnostic(`Opening persistent WebSocket channel to model: models/${modelId} with voice: ${voiceName}`, "NETWORK");
 
         liveWebSocket = new WebSocket(endpointUrl);
 
@@ -173,7 +186,7 @@
                 window.AndroidInterface.onLiveSessionConnected();
               }
 
-              // Immediately dispatch the commentary script turn to begin streaming audio
+              // Dispatch pending cue turn
               dispatchCommentaryTurn();
               return;
             }
@@ -218,7 +231,7 @@
 
               // 4. Model Turn Complete
               if (serverContent.turnComplete) {
-                logDiagnostic("Gemini Live turn completed. Audio stream finished.", "LIFECYCLE");
+                logDiagnostic("Gemini Live cue turn completed. Audio stream finished.", "LIFECYCLE");
 
                 if (!hasReceivedAudioChunks) {
                   logDiagnostic("Warning: Turn completed without receiving audio chunks.", "WARN");
@@ -228,10 +241,7 @@
                   window.AndroidInterface.onLiveCommentaryFinished();
                 }
 
-                // Cleanly close connection
-                setTimeout(() => {
-                  window.stopCommentarySession();
-                }, 500);
+                // KEEP CONNECTION ALIVE: Do not close WebSocket so the next cue starts with zero delay
               }
             }
           } catch (parseError) {
@@ -242,11 +252,14 @@
         liveWebSocket.onclose = (event) => {
           isConnectingSocket = false;
           isSessionConnected = false;
+          liveWebSocket = null;
           logDiagnostic(`WebSocket closed [Code: ${event.code}, Reason: ${event.reason || "None"}]`, "NETWORK");
         };
 
         liveWebSocket.onerror = (err) => {
           isConnectingSocket = false;
+          isSessionConnected = false;
+          liveWebSocket = null;
           logDiagnostic("WebSocket network error encountered.", "ERROR");
           if (typeof window.AndroidInterface.onLiveError === "function") {
             window.AndroidInterface.onLiveError("WebSocket connection failure.");
@@ -256,6 +269,7 @@
       } catch (exception) {
         isConnectingSocket = false;
         isSessionConnected = false;
+        liveWebSocket = null;
         logDiagnostic("Exception in initiateLiveWebSocket: " + exception.message, "ERROR");
         if (typeof window.AndroidInterface.onLiveError === "function") {
           window.AndroidInterface.onLiveError(exception.message);
@@ -268,7 +282,8 @@
      */
     function dispatchCommentaryTurn() {
       if (!liveWebSocket || liveWebSocket.readyState !== WebSocket.OPEN) {
-        logDiagnostic("Cannot dispatch commentary turn: WebSocket not open.", "ERROR");
+        logDiagnostic("Cannot dispatch commentary turn: WebSocket not open. Re-initiating...", "WARN");
+        initiateLiveWebSocket();
         return;
       }
 
@@ -294,7 +309,7 @@
     }
 
     /**
-     * Stops the WebSocket session and cleans up resources.
+     * Stops the WebSocket session and cleans up resources when production finishes.
      */
     window.stopCommentarySession = function() {
       logDiagnostic("stopCommentarySession invoked. Disposing WebSocket connection...", "LIFECYCLE");
@@ -325,6 +340,6 @@
 </head>
 <body style="background-color: #0B0E14; color: #FFFFFF; font-family: monospace; padding: 16px;">
   <h3>Editora Headless Live Commentator Runtime</h3>
-  <div id="status">Status: Engine Initialized</div>
+  <div id="status">Status: Persistent Engine Initialized</div>
 </body>
 </html>
