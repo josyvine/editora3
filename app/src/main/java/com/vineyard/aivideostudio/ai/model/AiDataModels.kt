@@ -3,6 +3,11 @@ package com.vineyard.aivideostudio.ai.model
 import com.squareup.moshi.JsonClass
 import com.vineyard.aivideostudio.core.model.QaVerdict
 
+enum class CueExecutionMode {
+    SINGLE,
+    MULTIPLE
+}
+
 @JsonClass(generateAdapter = true)
 data class SceneSegment(
     val start: Double,
@@ -126,7 +131,9 @@ data class CommentaryDecision(
     val isNecessary: Boolean = false,
     val commentarySegments: List<CommentaryItem> = emptyList(),
     val tone: String = "genre-adapted dynamic commentary with intense vocal cues",
-    val explanation: String = ""
+    val explanation: String = "",
+    val cueMode: String = "single",          // "single" or "multiple"
+    val cueConcurrency: Int = 1              // Dynamic concurrency limit
 )
 
 @JsonClass(generateAdapter = true)
