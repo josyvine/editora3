@@ -34,6 +34,7 @@ import com.vineyard.aivideostudio.core.model.effects.BlurSpec
 import com.vineyard.aivideostudio.core.model.effects.ColorGradeSpec
 import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
 import com.vineyard.aivideostudio.core.model.effects.SpeedRampSpec
+import com.vineyard.aivideostudio.core.model.effects.TextCardSpec
 import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
 import com.vineyard.aivideostudio.core.result.AppError
 import com.vineyard.aivideostudio.core.result.AppResult
@@ -530,7 +531,7 @@ class VideoProcessingPipeline(
     /**
      * Fast-Path Pipeline: Executes when user uploads or pastes a Master Recipe JSON from Google AI Studio.
      * Skips AI reasoning stages 1–7 and runs direct TTS audio generation + Media3 compilation.
-     * AUTOMATED TIMELINE REMAPPING: Accurately shifts dialogue, captions, blurs, and overlays to match speed play.
+     * AUTOMATED TIMELINE REMAPPING: Accurately shifts dialogue, captions, blurs, overlays, and text cards to match speed play.
      */
     private suspend fun executeMasterRecipePipeline(
         project: Project,
@@ -556,11 +557,12 @@ class VideoProcessingPipeline(
         val replacementSpecs = recipe.editingPlan.replacementOverlays.mapIndexed { idx, dto -> dto.toReplacementOverlaySpec(idx) }
         val colorGradeSpec = recipe.editingPlan.colorGrade?.toColorGradeSpec()
         val trackingSpecs = recipe.editingPlan.trackingIndicators.mapIndexed { idx, dto -> dto.toTrackingIndicatorSpec(idx) }
+        val cardSpecs = recipe.editingPlan.textCards.mapIndexed { idx, dto -> dto.toTextCardSpec(idx) }
 
         logger.log(
             projectId,
             PipelineStatus.SOURCE_ANALYSIS,
-            "Master Recipe Configuration: AudioOnly=${recipe.audioOnlyMode} | SpeedRamps=${speedSpecs.size} | Blurs=${blurSpecs.size} | Overlays=${replacementSpecs.size} | ColorGrade=${colorGradeSpec?.preset ?: "None"}",
+            "Master Recipe Configuration: AudioOnly=${recipe.audioOnlyMode} | SpeedRamps=${speedSpecs.size} | Blurs=${blurSpecs.size} | Overlays=${replacementSpecs.size} | Cards=${cardSpecs.size} | ColorGrade=${colorGradeSpec?.preset ?: "None"}",
             LogSeverity.INFO
         )
 
@@ -674,11 +676,12 @@ class VideoProcessingPipeline(
         val remappedBlurSpecs = TimelineMapper.remapBlurSpecs(timelineMap, blurSpecs)
         val remappedReplacementOverlays = TimelineMapper.remapReplacementOverlays(timelineMap, replacementSpecs)
         val remappedTrackingIndicators = TimelineMapper.remapTrackingIndicators(timelineMap, trackingSpecs)
+        val remappedTextCards = TimelineMapper.remapTextCards(timelineMap, cardSpecs)
 
         logger.log(
             projectId,
             PipelineStatus.CAPTION_ANALYSIS,
-            "Automated Remapping: Translated ${remappedCommentarySegments.size} voice cues, ${remappedCaptions.size} captions, ${remappedBlurSpecs.size} blurs, and ${remappedReplacementOverlays.size} overlays to compressed timeline",
+            "Automated Remapping: Translated ${remappedCommentarySegments.size} voice cues, ${remappedCaptions.size} captions, ${remappedBlurSpecs.size} blurs, ${remappedReplacementOverlays.size} overlays, and ${remappedTextCards.size} text cards",
             LogSeverity.INFO
         )
 
@@ -760,13 +763,13 @@ class VideoProcessingPipeline(
             )
         }
 
-        // 7. FINAL PRODUCTION EXPORT (HARDWARE SPEED PLAY, SYNCHRONIZED SHADERS & OVERLAYS)
+        // 7. FINAL PRODUCTION EXPORT (HARDWARE SPEED PLAY, SYNCHRONIZED SHADERS, TEXT CARDS & OVERLAYS)
         onStageChanged(PipelineStatus.EXPORTING, "Rendering final production with hardware speed ramping & shaders")
         recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.IN_PROGRESS, "Exporting final video")
         logger.log(
             projectId,
             PipelineStatus.EXPORTING,
-            "Starting Media3 Hardware Export: Slices=${speedSpecs.size + 1} | Overlays=${remappedReplacementOverlays.size} | Blurs=${remappedBlurSpecs.size} | PurgeSourceAudio=true",
+            "Starting Media3 Hardware Export: Slices=${speedSpecs.size + 1} | Overlays=${remappedReplacementOverlays.size} | Cards=${remappedTextCards.size} | Blurs=${remappedBlurSpecs.size} | PurgeSourceAudio=true",
             LogSeverity.INFO
         )
 
@@ -783,7 +786,8 @@ class VideoProcessingPipeline(
             blurSpecs = remappedBlurSpecs,
             replacementOverlays = remappedReplacementOverlays,
             colorGrade = colorGradeSpec,
-            trackingIndicators = remappedTrackingIndicators
+            trackingIndicators = remappedTrackingIndicators,
+            textCards = remappedTextCards
         )
 
         val finalVideoUri = when (exportResult) {
