@@ -88,11 +88,11 @@ class DynamicGraphicsOverlay(
         }
 
         for (spec in activeReplacements) {
-            val left = spec.bounds.left * canvasWidth
-            val top = spec.bounds.top * canvasHeight
-            val right = spec.bounds.right * canvasWidth
-            val bottom = spec.bounds.bottom * canvasHeight
-            val rect = RectF(left, top, right, bottom)
+            val left = spec.bounds.left.coerceIn(0f, 1f) * canvasWidth
+            val top = spec.bounds.top.coerceIn(0f, 1f) * canvasHeight
+            val right = spec.bounds.right.coerceIn(0f, 1f) * canvasWidth
+            val bottom = spec.bounds.bottom.coerceIn(0f, 1f) * canvasHeight
+            val rect = RectF(minOf(left, right), minOf(top, bottom), maxOf(left, right), maxOf(top, bottom))
 
             canvas.save()
             if (spec.rotationDegrees != 0f) {
@@ -155,18 +155,17 @@ class DynamicGraphicsOverlay(
 
             // Determine target bounding rectangle (Motion Keyframe OR Static UI Bounds)
             val rect: RectF = if (indicator.staticBounds != null) {
-                RectF(
-                    indicator.staticBounds.left * canvasWidth,
-                    indicator.staticBounds.top * canvasHeight,
-                    indicator.staticBounds.right * canvasWidth,
-                    indicator.staticBounds.bottom * canvasHeight
-                )
+                val l = minOf(indicator.staticBounds.left, indicator.staticBounds.right).coerceIn(0f, 1f) * canvasWidth
+                val r = maxOf(indicator.staticBounds.left, indicator.staticBounds.right).coerceIn(0f, 1f) * canvasWidth
+                val t = minOf(indicator.staticBounds.top, indicator.staticBounds.bottom).coerceIn(0f, 1f) * canvasHeight
+                val b = maxOf(indicator.staticBounds.top, indicator.staticBounds.bottom).coerceIn(0f, 1f) * canvasHeight
+                RectF(l, t, r, b)
             } else {
                 val currentFrame = interpolateKeyframe(indicator.keyframes, currentTimeMs) ?: continue
-                val cx = currentFrame.x * canvasWidth
-                val cy = currentFrame.y * canvasHeight
-                val bw = currentFrame.width * canvasWidth
-                val bh = currentFrame.height * canvasHeight
+                val cx = currentFrame.x.coerceIn(0f, 1f) * canvasWidth
+                val cy = currentFrame.y.coerceIn(0f, 1f) * canvasHeight
+                val bw = (currentFrame.width.coerceAtLeast(0.01f) * canvasWidth)
+                val bh = (currentFrame.height.coerceAtLeast(0.01f) * canvasHeight)
                 RectF(cx - (bw / 2f), cy - (bh / 2f), cx + (bw / 2f), cy + (bh / 2f))
             }
 
@@ -183,18 +182,28 @@ class DynamicGraphicsOverlay(
 
             when (indicator.style) {
                 TrackingStyle.BUTTON_HIGHLIGHT -> {
-                    // Pulsating corner brackets for stationary UI buttons (e.g. "Copy" icon)
+                    // Pulsating highlight box for UI buttons and icons (e.g. "Copy" button)
                     val pulse = (sin(currentTimeMs * 0.010) * 0.5 + 0.5).toFloat()
+                    val strokeW = indicator.strokeWidthPx + (pulse * 2.5f)
+
                     strokePaint.color = baseColor
-                    strokePaint.strokeWidth = indicator.strokeWidthPx + (pulse * 2f)
+                    strokePaint.strokeWidth = strokeW
                     strokePaint.alpha = (180 + (pulse * 75)).toInt().coerceIn(0, 255)
 
                     val pad = 8f + (pulse * 4f)
-                    val bracketRect = RectF(rect.left - pad, rect.top - pad, rect.right + pad, rect.bottom + pad)
-                    drawCornerBrackets(canvas, bracketRect, strokePaint)
+                    val highlightRect = RectF(rect.left - pad, rect.top - pad, rect.right + pad, rect.bottom + pad)
+
+                    // Subtle pulsating translucent fill to make target area unmistakable
+                    fillPaint.color = baseColor
+                    fillPaint.alpha = (25 + (pulse * 30)).toInt()
+                    canvas.drawRoundRect(highlightRect, 8f, 8f, fillPaint)
+
+                    // High-visibility rounded stroke & corner brackets
+                    canvas.drawRoundRect(highlightRect, 8f, 8f, strokePaint)
+                    drawCornerBrackets(canvas, highlightRect, strokePaint)
 
                     indicator.label?.let { label ->
-                        drawLabelBadge(canvas, label, bracketRect.centerX(), bracketRect.top - 8f)
+                        drawLabelBadge(canvas, label, highlightRect.centerX(), highlightRect.top - 8f)
                     }
                 }
 
@@ -260,7 +269,6 @@ class DynamicGraphicsOverlay(
 
         when (direction) {
             ArrowDirection.DOWN -> {
-                // Points down at top edge of target
                 val tipX = targetRect.centerX()
                 val tipY = targetRect.top - 12f + bounceOffset
                 arrowPath.moveTo(tipX, tipY)
@@ -268,7 +276,6 @@ class DynamicGraphicsOverlay(
                 arrowPath.lineTo(tipX + (arrowWidth / 2f), tipY - arrowLength)
             }
             ArrowDirection.UP -> {
-                // Points up at bottom edge of target
                 val tipX = targetRect.centerX()
                 val tipY = targetRect.bottom + 12f - bounceOffset
                 arrowPath.moveTo(tipX, tipY)
@@ -276,7 +283,6 @@ class DynamicGraphicsOverlay(
                 arrowPath.lineTo(tipX + (arrowWidth / 2f), tipY + arrowLength)
             }
             ArrowDirection.RIGHT -> {
-                // Points right at left edge of target
                 val tipX = targetRect.left - 12f + bounceOffset
                 val tipY = targetRect.centerY()
                 arrowPath.moveTo(tipX, tipY)
@@ -284,7 +290,6 @@ class DynamicGraphicsOverlay(
                 arrowPath.lineTo(tipX - arrowLength, tipY + (arrowWidth / 2f))
             }
             ArrowDirection.LEFT -> {
-                // Points left at right edge of target
                 val tipX = targetRect.right + 12f - bounceOffset
                 val tipY = targetRect.centerY()
                 arrowPath.moveTo(tipX, tipY)
@@ -314,7 +319,7 @@ class DynamicGraphicsOverlay(
 
         // Bottom-Right
         canvas.drawLine(r.right, r.bottom, r.right - len, r.bottom, paint)
-        canvas.drawLine(r.right, r.bottom, r.right, r.bottom - len, paint)
+        canvas.drawLine(r.right, r.bottom, r.right - len, r.bottom, paint)
     }
 
     private fun renderBackgroundDimming(
@@ -341,11 +346,20 @@ class DynamicGraphicsOverlay(
 
         val paddingHorizontal = 16f
         val paddingVertical = 8f
+        val totalBadgeHeight = textBounds.height() + (paddingVertical * 2)
+
+        // Clamp to screen top so badges never clip into negative coordinates
+        val resolvedBottomY = if (bottomY - totalBadgeHeight < 8f) {
+            bottomY + totalBadgeHeight + 32f
+        } else {
+            bottomY
+        }
+
         val badgeRect = RectF(
             centerX - (textBounds.width() / 2f) - paddingHorizontal,
-            bottomY - textBounds.height() - (paddingVertical * 2),
+            resolvedBottomY - totalBadgeHeight,
             centerX + (textBounds.width() / 2f) + paddingHorizontal,
-            bottomY
+            resolvedBottomY
         )
 
         fillPaint.color = Color.parseColor("#CC000000")
@@ -357,9 +371,10 @@ class DynamicGraphicsOverlay(
 
     private fun interpolateKeyframe(keyframes: List<TrackingKeyframe>, currentTimeMs: Long): TrackingKeyframe? {
         if (keyframes.isEmpty()) return null
-        if (currentTimeMs < keyframes.first().timeMs || currentTimeMs > keyframes.last().timeMs) {
-            return null
-        }
+
+        // CLAMP: Prevent blinking/vanishing when timeline reaches or passes boundary keyframes
+        if (currentTimeMs <= keyframes.first().timeMs) return keyframes.first()
+        if (currentTimeMs >= keyframes.last().timeMs) return keyframes.last()
 
         val nextIndex = keyframes.indexOfFirst { it.timeMs >= currentTimeMs }
         if (nextIndex <= 0) return keyframes.first()
