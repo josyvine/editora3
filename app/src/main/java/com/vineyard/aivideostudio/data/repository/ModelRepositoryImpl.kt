@@ -65,7 +65,7 @@ class ModelRepositoryImpl(
 
     suspend fun getSelectedModelForPurpose(purpose: ModelPurpose): String = withContext(Dispatchers.IO) {
         val config = modelDao.getConfiguration(purpose.name)
-        if (config != null) {
+        if (config != null && config.modelId.isNotBlank()) {
             return@withContext config.modelId
         }
 
@@ -93,6 +93,28 @@ class ModelRepositoryImpl(
                 updatedAt = System.currentTimeMillis()
             )
         )
+    }
+
+    suspend fun setSelectedModelForPurpose(purpose: ModelPurpose, modelId: String) = withContext(Dispatchers.IO) {
+        val cleanId = if (modelId.startsWith("models/")) modelId else "models/$modelId"
+        val cached = _cachedModels.value.firstOrNull { it.id == cleanId || it.id == modelId }
+
+        if (cached != null) {
+            setSelectedModelForPurpose(purpose, cached)
+        } else {
+            modelDao.setConfiguration(
+                ModelConfigurationEntity(
+                    purpose = purpose.name,
+                    modelId = cleanId,
+                    displayName = modelId.substringAfter("models/"),
+                    description = "User selected model",
+                    inputTokenLimit = 0,
+                    outputTokenLimit = 0,
+                    supportedCapabilitiesJson = "{}",
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
     }
 
     fun getAllConfigurations(): Flow<List<ModelConfigurationEntity>> {
