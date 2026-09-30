@@ -3,15 +3,18 @@ package com.vineyard.aivideostudio.ai.model
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
 import com.vineyard.aivideostudio.core.model.Caption
+import com.vineyard.aivideostudio.core.model.effects.ArrowDirection
 import com.vineyard.aivideostudio.core.model.effects.BlurShape
 import com.vineyard.aivideostudio.core.model.effects.BlurSpec
 import com.vineyard.aivideostudio.core.model.effects.BlurType
+import com.vineyard.aivideostudio.core.model.effects.CardLayout
 import com.vineyard.aivideostudio.core.model.effects.ColorGradeSpec
 import com.vineyard.aivideostudio.core.model.effects.ColorPreset
 import com.vineyard.aivideostudio.core.model.effects.NormalizedBounds
 import com.vineyard.aivideostudio.core.model.effects.OverlayType
 import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
 import com.vineyard.aivideostudio.core.model.effects.SpeedRampSpec
+import com.vineyard.aivideostudio.core.model.effects.TextCardSpec
 import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
 import com.vineyard.aivideostudio.core.model.effects.TrackingKeyframe
 import com.vineyard.aivideostudio.core.model.effects.TrackingStyle
@@ -42,8 +45,50 @@ data class EditingPlanDto(
     @Json(name = "blurEffects") val blurEffects: List<RecipeBlurDto> = emptyList(),
     @Json(name = "replacementOverlays") val replacementOverlays: List<RecipeReplacementDto> = emptyList(),
     @Json(name = "colorGrade") val colorGrade: RecipeColorGradeDto? = null,
-    @Json(name = "trackingIndicators") val trackingIndicators: List<RecipeTrackingDto> = emptyList()
+    @Json(name = "trackingIndicators") val trackingIndicators: List<RecipeTrackingDto> = emptyList(),
+    @Json(name = "textCards") val textCards: List<RecipeTextCardDto> = emptyList() // Intro slates, instruction cards & outro summaries
 )
+
+@JsonClass(generateAdapter = true)
+data class RecipeTextCardDto(
+    @Json(name = "id") val id: String? = null,
+    @Json(name = "start_time_ms") val startTimeMs: Long,
+    @Json(name = "end_time_ms") val endTimeMs: Long,
+    @Json(name = "layout") val layout: String = "full_screen_slate", // "full_screen_slate" or "floating_modal"
+    @Json(name = "tag") val tag: String? = null,                     // e.g. "INSTRUCTIONS", "SUMMARY", "TIP"
+    @Json(name = "title") val title: String,
+    @Json(name = "body_text") val bodyText: String = "",
+    @Json(name = "background_color_hex") val backgroundColorHex: String = "#101216",
+    @Json(name = "background_opacity") val backgroundOpacity: Float = 0.95f,
+    @Json(name = "accent_color_hex") val accentColorHex: String = "#4E9FFF",
+    @Json(name = "title_color_hex") val titleColorHex: String = "#FFFFFF",
+    @Json(name = "body_color_hex") val bodyColorHex: String = "#E2E8F0",
+    @Json(name = "title_font_size_sp") val titleFontSizeSp: Float = 54f,
+    @Json(name = "body_font_size_sp") val bodyFontSizeSp: Float = 36f
+) {
+    fun toTextCardSpec(index: Int): TextCardSpec {
+        val cardLayout = when (layout.lowercase()) {
+            "floating_modal" -> CardLayout.FLOATING_MODAL
+            else -> CardLayout.FULL_SCREEN_SLATE
+        }
+        return TextCardSpec(
+            id = id ?: "card_${index}_${System.currentTimeMillis()}",
+            startTimeMs = startTimeMs,
+            endTimeMs = endTimeMs,
+            layout = cardLayout,
+            tag = tag,
+            title = title,
+            bodyText = bodyText,
+            backgroundColorHex = backgroundColorHex,
+            backgroundOpacity = backgroundOpacity.coerceIn(0.0f, 1.0f),
+            accentColorHex = accentColorHex,
+            titleColorHex = titleColorHex,
+            bodyColorHex = bodyColorHex,
+            titleFontSizeSp = titleFontSizeSp,
+            bodyFontSizeSp = bodyFontSizeSp
+        )
+    }
+}
 
 @JsonClass(generateAdapter = true)
 data class HighlightSegmentDto(
@@ -231,10 +276,15 @@ data class RecipeKeyframeDto(
 @JsonClass(generateAdapter = true)
 data class RecipeTrackingDto(
     @Json(name = "id") val id: String? = null,
-    @Json(name = "style") val style: String = "red_box", // "red_box", "highlight_circle", "flashing_arrow", "spotlight"
+    @Json(name = "style") val style: String = "red_box", // "red_box", "highlight_circle", "flashing_arrow", "spotlight", "button_highlight", "vertical_column"
+    @Json(name = "arrow_direction") val arrowDirection: String = "down", // "up", "down", "left", "right"
     @Json(name = "color_hex") val colorHex: String = "#FF0000",
     @Json(name = "stroke_width_px") val strokeWidthPx: Float = 6.0f,
     @Json(name = "label") val label: String? = null,
+    @Json(name = "start_time_ms") val startTimeMs: Long = 0L,
+    @Json(name = "end_time_ms") val endTimeMs: Long = Long.MAX_VALUE,
+    @Json(name = "static_bounds") val staticBounds: NormalizedBoundsDto? = null, // For highlighting stationary UI buttons (e.g. "Copy" icon)
+    @Json(name = "dim_background_opacity") val dimBackgroundOpacity: Float = 0.0f, // 0.0 = off, 0.6 = darkens background for spotlight
     @Json(name = "keyframes") val keyframes: List<RecipeKeyframeDto> = emptyList()
 ) {
     fun toTrackingIndicatorSpec(index: Int): TrackingIndicatorSpec {
@@ -242,14 +292,27 @@ data class RecipeTrackingDto(
             "highlight_circle" -> TrackingStyle.HIGHLIGHT_CIRCLE
             "flashing_arrow" -> TrackingStyle.FLASHING_ARROW
             "spotlight" -> TrackingStyle.SPOTLIGHT
+            "button_highlight" -> TrackingStyle.BUTTON_HIGHLIGHT
+            "vertical_column" -> TrackingStyle.VERTICAL_COLUMN
             else -> TrackingStyle.RED_BOX
+        }
+        val direction = when (arrowDirection.lowercase()) {
+            "up" -> ArrowDirection.UP
+            "left" -> ArrowDirection.LEFT
+            "right" -> ArrowDirection.RIGHT
+            else -> ArrowDirection.DOWN
         }
         return TrackingIndicatorSpec(
             id = id ?: "track_ind_${index}_${System.currentTimeMillis()}",
             style = trackingStyle,
+            arrowDirection = direction,
             colorHex = colorHex,
             strokeWidthPx = strokeWidthPx,
             label = label,
+            startTimeMs = startTimeMs,
+            endTimeMs = endTimeMs,
+            staticBounds = staticBounds?.toNormalizedBounds(),
+            dimBackgroundOpacity = dimBackgroundOpacity.coerceIn(0.0f, 1.0f),
             keyframes = keyframes.map { it.toTrackingKeyframe() }
         )
     }
@@ -276,7 +339,7 @@ data class RecipeCaptionDto(
             y = if (y in 0.75f..0.96f) 0.90f else y,
             fontSizeSp = 22f,
             fontColorHex = colorHex,
-            backgroundColorHex = "#FF000000", // Solid opaque concealer mask
+            backgroundColorHex = "#FF000000",
             style = style
         )
     }
