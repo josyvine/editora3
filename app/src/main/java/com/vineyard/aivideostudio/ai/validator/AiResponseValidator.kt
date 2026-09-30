@@ -11,13 +11,15 @@ import com.vineyard.aivideostudio.core.model.effects.BlurSpec
 import com.vineyard.aivideostudio.core.model.effects.ColorGradeSpec
 import com.vineyard.aivideostudio.core.model.effects.ReplacementOverlaySpec
 import com.vineyard.aivideostudio.core.model.effects.SpeedRampSpec
+import com.vineyard.aivideostudio.core.model.effects.TextCardSpec
 import com.vineyard.aivideostudio.core.model.effects.TrackingIndicatorSpec
 import com.vineyard.aivideostudio.core.validation.ValidationResult
 
 object AiResponseValidator {
 
     /**
-     * Comprehensive validator for Master Recipe JSON scripts including advanced tools.
+     * Comprehensive validator for Master Recipe JSON scripts including advanced tools,
+     * instruction cards, and precision callouts.
      */
     fun validateMasterRecipe(recipe: MasterRecipe, sourceDurationSeconds: Double): ValidationResult {
         val durationMs = (sourceDurationSeconds * 1000).toLong()
@@ -27,7 +29,6 @@ object AiResponseValidator {
             if (recipe.commentary.fullScript.isBlank() && recipe.commentary.segments.isNullOrEmpty()) {
                 return ValidationResult.Invalid("Audio-only recipe must provide a commentary script or audio replacement track.", "commentary")
             }
-            return ValidationResult.Valid
         }
 
         // 2. Validate Speed Adjustments
@@ -51,11 +52,78 @@ object AiResponseValidator {
             if (colorValidation is ValidationResult.Invalid) return colorValidation
         }
 
-        // 6. Validate Motion Tracking
+        // 6. Validate Motion Tracking & UI Callouts
         val trackingSpecs = recipe.editingPlan.trackingIndicators.mapIndexed { idx, dto -> dto.toTrackingIndicatorSpec(idx) }
         val trackingValidation = validateTrackingIndicators(trackingSpecs, durationMs)
         if (trackingValidation is ValidationResult.Invalid) return trackingValidation
 
+        // 7. Validate Presentation Text Cards (Instruction & Conclusion Slates)
+        val cardSpecs = recipe.editingPlan.textCards.mapIndexed { idx, dto -> dto.toTextCardSpec(idx) }
+        val cardValidation = validateTextCards(cardSpecs, durationMs)
+        if (cardValidation is ValidationResult.Invalid) return cardValidation
+
+        return ValidationResult.Valid
+    }
+
+    /**
+     * Validates instruction slates, conclusion boards, and floating text cards.
+     */
+    fun validateTextCards(specs: List<TextCardSpec>, totalDurationMs: Long): ValidationResult {
+        for (card in specs) {
+            if (card.title.isBlank()) {
+                return ValidationResult.Invalid("Text card title cannot be blank (${card.id})", "textCard.title")
+            }
+            if (card.startTimeMs < 0L || card.endTimeMs <= card.startTimeMs) {
+                return ValidationResult.Invalid("Invalid text card timing [${card.startTimeMs}ms, ${card.endTimeMs}ms]", "textCard.timing")
+            }
+            if (card.endTimeMs > totalDurationMs + 2000L) {
+                return ValidationResult.Invalid("Text card end time (${card.endTimeMs}ms) exceeds video duration", "textCard.endTimeMs")
+            }
+            if (card.backgroundOpacity !in 0.0f..1.0f) {
+                return ValidationResult.Invalid("Background opacity must be within [0.0, 1.0]", "textCard.backgroundOpacity")
+            }
+        }
+        return ValidationResult.Valid
+    }
+
+    /**
+     * Validates motion tracking indicators, keyframes, stationary button callouts, and spotlight dimming.
+     */
+    fun validateTrackingIndicators(specs: List<TrackingIndicatorSpec>, totalDurationMs: Long): ValidationResult {
+        for (spec in specs) {
+            // Either keyframes or static bounds must be provided
+            if (spec.keyframes.isEmpty() && spec.staticBounds == null) {
+                return ValidationResult.Invalid(
+                    "Callout indicator '${spec.id}' must provide either keyframes or static_bounds for stationary targets.",
+                    "tracking.target"
+                )
+            }
+
+            // Validate static bounds if present
+            spec.staticBounds?.let { b ->
+                if (b.left !in 0f..1f || b.top !in 0f..1f || b.right !in 0f..1f || b.bottom !in 0f..1f) {
+                    return ValidationResult.Invalid("Static bounds coordinates must be normalized within [0.0, 1.0]", "tracking.staticBounds")
+                }
+            }
+
+            // Validate chronological keyframe progression if motion tracking
+            if (spec.keyframes.isNotEmpty()) {
+                var lastTime = -1L
+                for (kf in spec.keyframes) {
+                    if (kf.timeMs < lastTime) {
+                        return ValidationResult.Invalid("Keyframes must be chronologically ordered in indicator '${spec.id}'", "tracking.keyframe.time")
+                    }
+                    if (kf.x !in 0f..1f || kf.y !in 0f..1f) {
+                        return ValidationResult.Invalid("Target coordinates must be normalized within [0.0, 1.0]", "tracking.keyframe.coords")
+                    }
+                    lastTime = kf.timeMs
+                }
+            }
+
+            if (spec.dimBackgroundOpacity !in 0.0f..1.0f) {
+                return ValidationResult.Invalid("Dim background opacity must be within [0.0, 1.0]", "tracking.dimBackgroundOpacity")
+            }
+        }
         return ValidationResult.Valid
     }
 
@@ -153,28 +221,6 @@ object AiResponseValidator {
     }
 
     /**
-     * Validates motion tracking indicators, keyframes, and bounding coordinates.
-     */
-    fun validateTrackingIndicators(specs: List<TrackingIndicatorSpec>, totalDurationMs: Long): ValidationResult {
-        for (spec in specs) {
-            if (spec.keyframes.isEmpty()) {
-                return ValidationResult.Invalid("Tracking indicator '${spec.id}' must have at least one keyframe", "tracking.keyframes")
-            }
-            var lastTime = -1L
-            for (kf in spec.keyframes) {
-                if (kf.timeMs < lastTime) {
-                    return ValidationResult.Invalid("Keyframes must be chronologically ordered in indicator '${spec.id}'", "tracking.keyframe.time")
-                }
-                if (kf.x !in 0f..1f || kf.y !in 0f..1f) {
-                    return ValidationResult.Invalid("Tracking target coordinates must be normalized within [0.0, 1.0]", "tracking.keyframe.coords")
-                }
-                lastTime = kf.timeMs
-            }
-        }
-        return ValidationResult.Valid
-    }
-
-    /**
      * Validates source video analysis output.
      */
     fun validateSourceAnalysis(analysis: SourceAnalysis): ValidationResult {
@@ -196,8 +242,7 @@ object AiResponseValidator {
     }
 
     /**
-     * Validates trim decisions. When enforceTransformativeCut is true,
-     * returning 0 cuts is rejected to guarantee derivative video editing.
+     * Validates trim decisions.
      */
     fun validateTrim(
         decision: TrimDecision,
@@ -234,7 +279,6 @@ object AiResponseValidator {
             lastEnd = segment.end
         }
 
-        // Verify that the cut plan does not delete the entire video
         val totalRemoved = sorted.sumOf { it.end - it.start }
         if (totalRemoved >= currentDuration - 0.5) {
             return ValidationResult.Invalid("Trim plan would remove almost entire video ($totalRemoved of $currentDuration s)", "segments")
@@ -317,7 +361,7 @@ object AiResponseValidator {
     }
 
     /**
-     * Validates commentary segments that will replace the purged original audio.
+     * Validates commentary segments.
      */
     fun validateCommentary(
         decision: CommentaryDecision,
