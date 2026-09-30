@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Editora Headless Live Commentator Engine</title>
+  <script>
+    // --- Global State Variables ---
+    let liveWebSocket = null;
+    let liveAudioContext = null;
+    let isSessionConnected = false;
+    let isConnectingSocket = false;
+    let pendingScriptText = "";
+    let pendingPersonaPrompt = "";
+    let accumulatedBotTranscript = "";
+    let hasReceivedAudioChunks = false;
+
+    /**
+     * Dispatches diagnostics to Android system log console via the Java Bridge.
+     */
+    function logDiagnostic(message, category = "INFO") {
+      console.log(`[${category}] ${message}`);
+      if (window.AndroidInterface && typeof window.AndroidInterface.logDiagnostic === "function") {
+        window.AndroidInterface.logDiagnostic(message, category);
+      }
+    }
+
+    /**
+     * Converts raw ArrayBuffer to Base64 string.
+     */
+    function arrayBufferToBase64(buffer) {
+      let binary = "";
+      const bytes = new Uint8Array(buffer);
+      const len = bytes.byteLength;
+      for (let i = 0; i < len; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return window.btoa(binary);
+    }
+
+    /**
+     * Converts Base64 string to ArrayBuffer.
+     */
+    function base64ToArrayBuffer(base64) {
+      const binaryString = window.atob(base64);
+      const len = binaryString.length;
+      const bytes = new Uint8Array(len);
+      for (let i = 0; i < len; i++) {
+        bytes[i] = binaryString.charCodeAt(i);
+      }
+      return bytes.buffer;
+    }
+
+    /**
+     * Entry Point: Called by Android Kotlin via evaluateJavascript to start commentary generation.
+     * @param scriptText The commentary script containing emotional cue tags (e.g. [SCREAMING], [SHOUTING], [MOANING IN DISBELIEF]).
+     * @param personaPrompt The genre-conditioned director persona instructions.
+     */
+    window.startCommentarySession = function(scriptText, personaPrompt) {
+      logDiagnostic("startCommentarySession invoked by native engine.", "LIFECYCLE");
+
+      if (!window.AndroidInterface) {
+        logDiagnostic("Fatal: Native AndroidInterface bridge is not bound.", "ERROR");
+        return;
+      }
+
+      pendingScriptText = scriptText || "";
+      pendingPersonaPrompt = personaPrompt || "";
+      accumulatedBotTranscript = "";
+      hasReceivedAudioChunks = false;
+
+      initiateLiveWebSocket();
+    };
+
+    /**
+     * Connects to the Gemini Live BidiGenerateContent WebSocket endpoint.
+     */
+    function initiateLiveWebSocket() {
+      if (isConnectingSocket || isSessionConnected) {
+        logDiagnostic("Closing existing live session before re-establishing...", "NETWORK");
+        window.stopCommentarySession();
+      }
+
+      isConnectingSocket = true;
+
+      try {
+        if (typeof window.AndroidInterface.onLiveSessionConnecting === "function") {
+          window.AndroidInterface.onLiveSessionConnecting();
+        }
+
+        const apiKey = window.AndroidInterface.getGeminiApiKey();
+        let modelId = window.AndroidInterface.getModelId();
+        const voiceName = window.AndroidInterface.getVoiceName() || "Puck";
+
+        if (!apiKey || apiKey.trim() === "") {
+          const err = "Gemini API Key is empty or missing.";
+          logDiagnostic(err, "ERROR");
+          if (typeof window.AndroidInterface.onLiveError === "function") {
+            window.AndroidInterface.onLiveError(err);
+          }
+          isConnectingSocket = false;
+          return;
+        }
+
+        // Clean model prefix
+        if (modelId.startsWith("models/")) {
+          modelId = modelId.replace("models/", "");
+        }
+        if (!modelId || modelId.trim() === "") {
+          modelId = "gemini-3.8-live";
+        }
+
+        const endpointUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
+        logDiagnostic(`Opening WebSocket channel to model: ${modelId} with voice: ${voiceName}`, "NETWORK");
+
+        liveWebSocket = new WebSocket(endpointUrl);
+
+        liveWebSocket.onopen = () => {
+          logDiagnostic("WebSocket channel opened. Dispatching Setup Handshake frame...", "NETWORK");
+
+          let effectiveSystemInstruction = pendingPersonaPrompt;
+          if (!effectiveSystemInstruction || effectiveSystemInstruction.trim() === "") {
+            effectiveSystemInstruction = "You are an electrifying, loud, unhinged live sports and viral video commentator. " +
+              "The original audio is completely purged. You MUST scream, shout, moan in disbelief, and deliver explosive hype for highlights! " +
+              "You must strictly vocalize and act out all bracketed stage directions like [SCREAMING], [LOUD SHOUT], [MOANING IN DISBELIEF], [LOUD ROAR] " +
+              "with your real voice volume, breath, and pitch. Never read the bracketed tags aloud.";
+          } else {
+            effectiveSystemInstruction += " " +
+              "CRITICAL VOCAL DIRECTIVE: You must strictly act out and vocalize all bracketed emotional cues like [SCREAMING], [SHOUTING], [MOANING IN DISBELIEF], [LOUD ROAR] " +
+              "with your genuine voice volume and timbre. Do not read the bracketed cue tags aloud as words.";
+          }
+
+          const setupPayload = {
+            setup: {
+              model: "models/" + modelId,
+              generationConfig: {
+                responseModalities: ["AUDIO"],
+                speechConfig: {
+                  voiceConfig: {
+                    prebuiltVoiceConfig: {
+                      voiceName: voiceName
+                    }
+                  }
+                }
+              },
+              systemInstruction: {
+                parts: [{
+                  text: effectiveSystemInstruction
+                }]
+              }
+            }
+          };
+
+          liveWebSocket.send(JSON.stringify(setupPayload));
+          logDiagnostic("Setup frame dispatched successfully.", "NETWORK");
+        };
+
+        liveWebSocket.onmessage = async (event) => {
+          try {
+            let payload;
+            if (event.data instanceof Blob) {
+              const textContent = await event.data.text();
+              payload = JSON.parse(textContent);
+            } else {
+              payload = JSON.parse(event.data);
+            }
+
+            // 1. Handshake Confirmation
+            if (payload.setupComplete) {
+              isConnectingSocket = false;
+              isSessionConnected = true;
+              logDiagnostic("Handshake complete: Live Model ready to receive script.", "NETWORK");
+
+              if (typeof window.AndroidInterface.onLiveSessionConnected === "function") {
+                window.AndroidInterface.onLiveSessionConnected();
+              }
+
+              // Immediately dispatch the commentary script to trigger voice generation
+              dispatchCommentaryTurn();
+              return;
+            }
+
+            // 2. Server Error Frame
+            if (payload.error) {
+              isConnectingSocket = false;
+              const errorMsg = "Gemini Live API Error: " + JSON.stringify(payload.error);
+              logDiagnostic(errorMsg, "ERROR");
+              if (typeof window.AndroidInterface.onLiveError === "function") {
+                window.AndroidInterface.onLiveError(errorMsg);
+              }
+              window.stopCommentarySession();
+              return;
+            }
+
+            // 3. Incoming Audio Stream & Transcripts
+            if (payload.serverContent) {
+              const serverContent = payload.serverContent;
+
+              if (serverContent.modelTurn && serverContent.modelTurn.parts) {
+                for (const part of serverContent.modelTurn.parts) {
+                  // Forward transcript text if returned
+                  if (part.text) {
+                    accumulatedBotTranscript += part.text;
+                    if (typeof window.AndroidInterface.onLiveCommentaryText === "function") {
+                      window.AndroidInterface.onLiveCommentaryText(part.text);
+                    }
+                  }
+
+                  // Stream raw 24kHz PCM Audio Chunk to Android Kotlin
+                  if (part.inlineData && part.inlineData.data) {
+                    hasReceivedAudioChunks = true;
+                    const base64Chunk = part.inlineData.data;
+
+                    if (typeof window.AndroidInterface.onLiveAudioChunkReceived === "function") {
+                      window.AndroidInterface.onLiveAudioChunkReceived(base64Chunk);
+                    }
+                  }
+                }
+              }
+
+              // 4. Model Turn Complete
+              if (serverContent.turnComplete) {
+                logDiagnostic("Gemini Live server turn completed. Commentary audio stream finished.", "LIFECYCLE");
+
+                if (!hasReceivedAudioChunks) {
+                  logDiagnostic("Warning: Turn completed without receiving audio chunks.", "WARN");
+                }
+
+                if (typeof window.AndroidInterface.onLiveCommentaryFinished === "function") {
+                  window.AndroidInterface.onLiveCommentaryFinished();
+                }
+
+                // Close cleanly after turn completion
+                setTimeout(() => {
+                  window.stopCommentarySession();
+                }, 500);
+              }
+            }
+          } catch (parseError) {
+            logDiagnostic("Error parsing WebSocket frame: " + parseError.message, "ERROR");
+          }
+        };
+
+        liveWebSocket.onclose = (event) => {
+          isConnectingSocket = false;
+          isSessionConnected = false;
+          logDiagnostic(`WebSocket closed [Code: ${event.code}, Reason: ${event.reason || "None"}]`, "NETWORK");
+        };
+
+        liveWebSocket.onerror = (err) => {
+          isConnectingSocket = false;
+          logDiagnostic("WebSocket network error encountered.", "ERROR");
+          if (typeof window.AndroidInterface.onLiveError === "function") {
+            window.AndroidInterface.onLiveError("WebSocket connection failure.");
+          }
+        };
+
+      } catch (exception) {
+        isConnectingSocket = false;
+        isSessionConnected = false;
+        logDiagnostic("Exception in initiateLiveWebSocket: " + exception.message, "ERROR");
+        if (typeof window.AndroidInterface.onLiveError === "function") {
+          window.AndroidInterface.onLiveError(exception.message);
+        }
+      }
+    }
+
+    /**
+     * Sends the commentary script turn to the connected Gemini Live model.
+     */
+    function dispatchCommentaryTurn() {
+      if (!liveWebSocket || liveWebSocket.readyState !== WebSocket.OPEN) {
+        logDiagnostic("Cannot dispatch commentary turn: WebSocket not open.", "ERROR");
+        return;
+      }
+
+      logDiagnostic("Streaming commentary script to model with full vocal intensity directives...", "LIFECYCLE");
+
+      const promptPayload = {
+        clientContent: {
+          turns: [{
+            role: "user",
+            parts: [{
+              text: "Deliver this voiceover commentary performance immediately. " +
+                    "Act out all emotional cues: scream loudly, shout with full energy, moan in disbelief, and laugh naturally according to the bracketed directions. " +
+                    "Do NOT say 'Okay', 'Here is the commentary', or any greetings. Start the commentary performance immediately:\n\n" +
+                    pendingScriptText
+            }]
+          }],
+          turnComplete: true
+        }
+      };
+
+      liveWebSocket.send(JSON.stringify(promptPayload));
+      logDiagnostic("Commentary clientContent turn dispatched.", "NETWORK");
+    }
+
+    /**
+     * Stops the WebSocket session and cleans up resources.
+     */
+    window.stopCommentarySession = function() {
+      logDiagnostic("stopCommentarySession invoked. Disposing WebSocket connection...", "LIFECYCLE");
+      isSessionConnected = false;
+      isConnectingSocket = false;
+
+      if (liveWebSocket) {
+        try {
+          if (liveWebSocket.readyState === WebSocket.OPEN || liveWebSocket.readyState === WebSocket.CONNECTING) {
+            liveWebSocket.close();
+          }
+        } catch (e) {
+          // ignore
+        }
+        liveWebSocket = null;
+      }
+
+      if (liveAudioContext) {
+        try {
+          liveAudioContext.close();
+        } catch (e) {
+          // ignore
+        }
+        liveAudioContext = null;
+      }
+    };
+  </script>
+</head>
+<body style="background-color: #0B0E14; color: #FFFFFF; font-family: monospace; padding: 16px;">
+  <h3>Editora Headless Live Commentator Runtime</h3>
+  <div id="status">Status: Engine Initialized</div>
+</body>
+</html>
