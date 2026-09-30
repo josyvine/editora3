@@ -54,9 +54,15 @@ import com.vineyard.aivideostudio.voice.live.LiveCommentatorManager
 import com.vineyard.aivideostudio.voice.model.TtsRequest
 import com.vineyard.aivideostudio.voice.tts.GeminiTtsEngine
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.coroutines.coroutineContext
 
 class VideoProcessingPipeline(
@@ -81,11 +87,14 @@ class VideoProcessingPipeline(
         val project = projectRepository.getProjectById(projectId)
             ?: return@withContext AppResult.Error(AppError.StorageError("Project not found: $projectId"))
 
-        // Fast-Path: If Master Recipe JSON is attached, execute recipe mode directly
+        // Fast-Path: If Master Recipe JSON is attached, execute recipe mode directly (Script Mode)
         if (!project.masterRecipeJson.isNullOrBlank()) {
             return@withContext executeMasterRecipePipeline(project, onStageChanged)
         }
 
+        // =========================================================================
+        // AUTO MODE (Strictly single/sequential execution)
+        // =========================================================================
         val videoMetadataReader = VideoMetadataReader(context)
         logger.log(projectId, PipelineStatus.SOURCE_ANALYSIS, "Starting Auto AI Video Studio pipeline for ${project.name}")
 
@@ -419,7 +428,7 @@ class VideoProcessingPipeline(
         projectRepository.saveCaptions(projectId, captionsToSave)
         recordStep(projectId, PipelineStatus.CAPTION_ANALYSIS, StepStatus.COMPLETED, "${captionsToSave.size} captions configured")
 
-        // 8. COMMENTARY & LIVE WEBSOCKET AUDIO GENERATION
+        // 8. COMMENTARY (Auto Mode: Always single unified track)
         onStageChanged(PipelineStatus.COMMENTARY_ANALYSIS, "Gemini composing voiceover script (${String.format("%.1f", currentDuration)}s)")
         recordStep(projectId, PipelineStatus.COMMENTARY_ANALYSIS, StepStatus.IN_PROGRESS, "Composing commentary")
 
@@ -529,9 +538,9 @@ class VideoProcessingPipeline(
     }
 
     /**
-     * Fast-Path Pipeline: Executes when user uploads or pastes a Master Recipe JSON from Google AI Studio.
-     * Skips AI reasoning stages 1–7 and runs direct TTS audio generation + Media3 compilation.
-     * AUTOMATED TIMELINE REMAPPING: Accurately shifts dialogue, captions, blurs, overlays, and text cards to match speed play.
+     * SCRIPT MODE (Direct Master Recipe Execution):
+     * Executes when user supplies a Master Recipe JSON script.
+     * Evaluates cueMode ("single" or "multiple") and cueConcurrency (e.g. 10 at a time) dynamically from JSON.
      */
     private suspend fun executeMasterRecipePipeline(
         project: Project,
@@ -550,6 +559,15 @@ class VideoProcessingPipeline(
 
         var currentVideoUri = project.sourceUri
         val rawSourceDuration = project.metadata.durationSeconds
+
+        // Extract cue processing mode and concurrency from the JSON script
+        val effectiveCueMode = recipe.cueMode ?: recipe.commentary.cueMode ?: "single"
+        val rawConcurrency = recipe.cueConcurrency ?: recipe.commentary.cueConcurrency ?: 1
+        val effectiveConcurrency = if (effectiveCueMode.equals("multiple", ignoreCase = true)) {
+            rawConcurrency.coerceAtLeast(1)
+        } else {
+            1
+        }
 
         // Extract Advanced Tools from Recipe
         val speedSpecs = recipe.editingPlan.speedAdjustments.map { it.toSpeedRampSpec() }
@@ -691,7 +709,7 @@ class VideoProcessingPipeline(
         logger.log(
             projectId,
             PipelineStatus.TTS_GENERATION,
-            "Synthesizing Soundtrack: ${remappedCommentarySegments.size} cues | Voice=${recipe.commentary.voiceName ?: "Puck"} | Persona=${recipe.commentary.tone ?: "Default"}",
+            "Synthesizing Soundtrack: ${remappedCommentarySegments.size} cues | Mode=$effectiveCueMode (Concurrency=$effectiveConcurrency) | Voice=${recipe.commentary.voiceName ?: "Puck"} | Persona=${recipe.commentary.tone ?: "Default"}",
             LogSeverity.INFO
         )
 
@@ -702,7 +720,9 @@ class VideoProcessingPipeline(
                 segments = remappedCommentarySegments,
                 tone = recipe.commentary.tone,
                 voiceName = recipe.commentary.voiceName,
-                outputM4aFile = commentaryAudioOutputFile
+                outputM4aFile = commentaryAudioOutputFile,
+                cueMode = effectiveCueMode,
+                concurrency = effectiveConcurrency
             )
         } else if (recipe.commentary.fullScript.isNotBlank()) {
             synthesizeSingleBlockCommentary(
@@ -763,7 +783,7 @@ class VideoProcessingPipeline(
             )
         }
 
-        // 7. FINAL PRODUCTION EXPORT (HARDWARE SPEED PLAY, SYNCHRONIZED SHADERS, TEXT CARDS & OVERLAYS)
+        // 7. FINAL PRODUCTION EXPORT
         onStageChanged(PipelineStatus.EXPORTING, "Rendering final production with hardware speed ramping & shaders")
         recordStep(projectId, PipelineStatus.EXPORTING, StepStatus.IN_PROGRESS, "Exporting final video")
         logger.log(
@@ -837,29 +857,67 @@ class VideoProcessingPipeline(
     }
 
     /**
-     * Synthesizes timestamped commentary cues with silence padding to ensure speech triggers
-     * at exact scenes across the entire video timeline without desync.
+     * Synthesizes timestamped commentary cues with silence padding.
+     * Supports both "single" (sequential) and "multiple" (concurrent coroutines) modes based on JSON script.
      */
     private suspend fun synthesizeSegmentedCommentary(
         projectId: String,
         segments: List<CommentarySegmentDto>,
         tone: String?,
         voiceName: String?,
-        outputM4aFile: File
-    ): File? {
+        outputM4aFile: File,
+        cueMode: String = "single",
+        concurrency: Int = 1
+    ): File? = withContext(Dispatchers.IO) {
         val sampleRate = 24_000
         val bytesPerSec = sampleRate * 2 // 16-bit mono = 48,000 bytes/second
         val tempPcmFile = storageManager.createAudioOutputFile(projectId, "commentary_timeline_composite.pcm")
+        val sortedSegments = segments.sortedBy { it.start ?: 0.0 }
+        val totalCues = sortedSegments.size
+        val isMultiple = cueMode.equals("multiple", ignoreCase = true) && concurrency > 1
 
         try {
+            // Step A: Synthesize cues (either in parallel via Coroutines+Semaphore or 1 by 1 sequentially)
+            val segmentPcmFiles = if (isMultiple) {
+                val semaphore = Semaphore(concurrency)
+                val completedCount = AtomicInteger(0)
+
+                coroutineScope {
+                    sortedSegments.mapIndexed { idx, seg ->
+                        async(Dispatchers.IO) {
+                            semaphore.withPermit {
+                                val current = completedCount.incrementAndGet()
+                                logger.log(
+                                    projectId,
+                                    PipelineStatus.TTS_GENERATION,
+                                    "Synthesizing Cue $current/$totalCues [${String.format("%.1f", seg.start ?: 0.0)}s] (Parallel Queue): \"${seg.text.take(35)}...\"",
+                                    LogSeverity.INFO
+                                )
+                                synthesizeSingleCueToPcm(projectId, idx, seg, tone, voiceName)
+                            }
+                        }
+                    }.awaitAll()
+                }
+            } else {
+                sortedSegments.mapIndexed { idx, seg ->
+                    logger.log(
+                        projectId,
+                        PipelineStatus.TTS_GENERATION,
+                        "Synthesizing Cue ${idx + 1}/$totalCues [${String.format("%.1f", seg.start ?: 0.0)}s]: \"${seg.text.take(35)}...\"",
+                        LogSeverity.INFO
+                    )
+                    synthesizeSingleCueToPcm(projectId, idx, seg, tone, voiceName)
+                }
+            }
+
+            // Step B: Stitch synthesized PCM cues in exact chronological order with digital silence padding
             tempPcmFile.outputStream().use { outputStream ->
                 var currentTimelineByteOffset = 0L
 
-                for ((idx, seg) in segments.sortedBy { it.start ?: 0.0 }.withIndex()) {
+                for ((idx, seg) in sortedSegments.withIndex()) {
                     val segStartSec = seg.start ?: 0.0
                     val targetByteOffset = (segStartSec * bytesPerSec).toLong()
 
-                    // Insert digital silence gap between commentary cues
                     if (targetByteOffset > currentTimelineByteOffset) {
                         val silenceBytesCount = (targetByteOffset - currentTimelineByteOffset).toInt()
                         val silenceBuffer = ByteArray(minOf(silenceBytesCount, 48000))
@@ -872,43 +930,12 @@ class VideoProcessingPipeline(
                         currentTimelineByteOffset = targetByteOffset
                     }
 
-                    logger.log(
-                        projectId,
-                        PipelineStatus.TTS_GENERATION,
-                        "Synthesizing Cue ${idx + 1}/${segments.size} [${String.format("%.1f", segStartSec)}s]: \"${seg.text.take(35)}...\"",
-                        LogSeverity.INFO
-                    )
-
-                    // Synthesize individual segment
-                    val segPcmFile = storageManager.createAudioOutputFile(projectId, "seg_${idx}_raw.pcm")
-                    val segTtsResult = liveCommentatorManager.generateLiveCommentary(
-                        scriptText = seg.text,
-                        personaPrompt = tone ?: "Professional clear studio voiceover.",
-                        outputPcmFile = segPcmFile
-                    )
-
-                    if (segTtsResult is AppResult.Success && segPcmFile.exists() && segPcmFile.length() > 0L) {
-                        val pcmBytes = segPcmFile.readBytes()
+                    val segPcm = segmentPcmFiles.getOrNull(idx)
+                    if (segPcm != null && segPcm.exists() && segPcm.length() > 0L) {
+                        val pcmBytes = segPcm.readBytes()
                         outputStream.write(pcmBytes)
                         currentTimelineByteOffset += pcmBytes.size
-                        segPcmFile.delete()
-                    } else {
-                        // Fallback REST TTS
-                        val segFallbackPcm = storageManager.createAudioOutputFile(projectId, "seg_${idx}_fb.pcm")
-                        val segM4a = storageManager.createAudioOutputFile(projectId, "seg_${idx}_fb.m4a")
-                        val fbRes = ttsEngine.synthesizeSpeech(
-                            TtsRequest(text = seg.text, voiceName = voiceName ?: "Puck", outputFilePath = segM4a.absolutePath)
-                        )
-                        if (fbRes.success && segM4a.exists()) {
-                            audioExtractor.extractAudio(Uri.fromFile(segM4a), segFallbackPcm)
-                            if (segFallbackPcm.exists() && segFallbackPcm.length() > 0L) {
-                                val fbBytes = segFallbackPcm.readBytes()
-                                outputStream.write(fbBytes)
-                                currentTimelineByteOffset += fbBytes.size
-                                segFallbackPcm.delete()
-                            }
-                            segM4a.delete()
-                        }
+                        segPcm.delete()
                     }
                 }
             }
@@ -917,7 +944,7 @@ class VideoProcessingPipeline(
                 val conversionResult = pcmToM4aConverter.convert(tempPcmFile, outputM4aFile, sampleRate)
                 tempPcmFile.delete()
                 if (conversionResult is AppResult.Success) {
-                    return outputM4aFile
+                    return@withContext outputM4aFile
                 }
             }
         } catch (e: Exception) {
@@ -931,6 +958,43 @@ class VideoProcessingPipeline(
             tempPcmFile.delete()
         }
 
+        return@withContext null
+    }
+
+    /**
+     * Synthesizes an individual cue segment to a temporary PCM file.
+     */
+    private suspend fun synthesizeSingleCueToPcm(
+        projectId: String,
+        idx: Int,
+        seg: CommentarySegmentDto,
+        tone: String?,
+        voiceName: String?
+    ): File? {
+        val segPcmFile = storageManager.createAudioOutputFile(projectId, "seg_${idx}_raw.pcm")
+        val segTtsResult = liveCommentatorManager.generateLiveCommentary(
+            scriptText = seg.text,
+            personaPrompt = tone ?: "Professional clear studio voiceover.",
+            outputPcmFile = segPcmFile
+        )
+
+        if (segTtsResult is AppResult.Success && segPcmFile.exists() && segPcmFile.length() > 0L) {
+            return segPcmFile
+        }
+
+        // Fallback REST TTS
+        val segFallbackPcm = storageManager.createAudioOutputFile(projectId, "seg_${idx}_fb.pcm")
+        val segM4a = storageManager.createAudioOutputFile(projectId, "seg_${idx}_fb.m4a")
+        val fbRes = ttsEngine.synthesizeSpeech(
+            TtsRequest(text = seg.text, voiceName = voiceName ?: "Puck", outputFilePath = segM4a.absolutePath)
+        )
+        if (fbRes.success && segM4a.exists()) {
+            audioExtractor.extractAudio(Uri.fromFile(segM4a), segFallbackPcm)
+            segM4a.delete()
+            if (segFallbackPcm.exists() && segFallbackPcm.length() > 0L) {
+                return segFallbackPcm
+            }
+        }
         return null
     }
 
