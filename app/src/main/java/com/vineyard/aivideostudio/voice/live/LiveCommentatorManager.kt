@@ -48,6 +48,7 @@ class LiveCommentatorManager(
     private var pageLoadedDeferred: CompletableDeferred<Boolean>? = null
 
     private var activeFileOutputStream: FileOutputStream? = null
+    private var activeOutputFile: File? = null
     private var commentaryDeferred: CompletableDeferred<AppResult<File>>? = null
     private val isSessionActive = AtomicBoolean(false)
     private var currentSessionModelId: String? = null
@@ -199,9 +200,11 @@ class LiveCommentatorManager(
 
         try {
             activeFileOutputStream = FileOutputStream(outputPcmFile, false)
+            activeOutputFile = outputPcmFile
         } catch (e: Exception) {
             isSessionActive.set(false)
             currentSessionModelId = null
+            activeOutputFile = null
             return@withContext AppResult.Error(AppError.StorageError("Cannot create output PCM file: ${e.message}"))
         }
 
@@ -226,6 +229,7 @@ class LiveCommentatorManager(
 
         isSessionActive.set(false)
         currentSessionModelId = null
+        activeOutputFile = null
         return@withContext result
     }
 
@@ -247,6 +251,8 @@ class LiveCommentatorManager(
      * Invoked when the Live model turn is complete and audio streaming is finished.
      */
     private fun handleCommentaryCompletion() {
+        val completedFile = activeOutputFile
+
         synchronized(this) {
             try {
                 activeFileOutputStream?.flush()
@@ -259,7 +265,7 @@ class LiveCommentatorManager(
 
         commentaryDeferred?.let { def ->
             if (def.isActive) {
-                def.complete(AppResult.Success(File("")))
+                def.complete(AppResult.Success(completedFile ?: File("")))
             }
         }
     }
@@ -273,6 +279,7 @@ class LiveCommentatorManager(
             try {
                 activeFileOutputStream?.close()
                 activeFileOutputStream = null
+                activeOutputFile = null
             } catch (_: Exception) {}
         }
 
@@ -292,6 +299,7 @@ class LiveCommentatorManager(
             try {
                 activeFileOutputStream?.close()
                 activeFileOutputStream = null
+                activeOutputFile = null
             } catch (_: Exception) {}
         }
         isSessionActive.set(false)
@@ -321,6 +329,11 @@ class LiveCommentatorManager(
             .replace("\t", "\\t")
     }
 
+    private fun cleanModelId(rawId: String): String {
+        val clean = rawId.trim()
+        return if (clean.startsWith("models/")) clean else "models/$clean"
+    }
+
     private fun fetchApiKeySync(): String {
         return kotlinx.coroutines.runBlocking(dispatcherProvider.io) {
             try {
@@ -333,21 +346,21 @@ class LiveCommentatorManager(
 
     private fun fetchModelIdSync(): String {
         // 1. Session-level model override if provided
-        currentSessionModelId?.let { if (it.isNotBlank()) return it }
+        currentSessionModelId?.let { if (it.isNotBlank()) return cleanModelId(it) }
 
         return kotlinx.coroutines.runBlocking(dispatcherProvider.io) {
             try {
                 // 2. Read dynamically configured model from Room database (set via Settings dropdown)
                 val repoModel = modelRepository?.getSelectedModelForPurpose(ModelPurpose.LIVE_VOICE)
                 if (!repoModel.isNullOrBlank()) {
-                    return@runBlocking repoModel
+                    return@runBlocking cleanModelId(repoModel)
                 }
 
                 // 3. Check preferences flow
                 val configuredModel = preferences.selectedLiveModel.first()
-                if (configuredModel.isNotBlank()) configuredModel else ""
+                if (configuredModel.isNotBlank()) cleanModelId(configuredModel) else "models/gemini-2.5-flash-native-audio-preview-12-2025"
             } catch (_: Exception) {
-                ""
+                "models/gemini-2.5-flash-native-audio-preview-12-2025"
             }
         }
     }
