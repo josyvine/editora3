@@ -17,6 +17,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class ProcessingController(
     private val context: Context,
@@ -33,11 +34,15 @@ class ProcessingController(
     fun loadProject(projectId: String) {
         scope.launch {
             val project = projectRepository.getProjectById(projectId)
-            val initialMsg = if (!project?.sourceYoutubeUrl.isNullOrBlank()) {
-                "Ready to edit. Gemini will first analyze the YouTube source video (${project?.sourceYoutubeUrl}) and compare with your downloaded local video."
-            } else {
-                "Ready to start AI video production"
+            val isScriptMode = !project?.masterRecipeJson.isNullOrBlank()
+
+            val initialMsg = when {
+                isScriptMode -> "Ready to execute Master Recipe Script (Direct Mode)."
+                !project?.sourceYoutubeUrl.isNullOrBlank() ->
+                    "Ready to edit. Gemini will first analyze the YouTube source video (${project.sourceYoutubeUrl}) and compare with your downloaded local video."
+                else -> "Ready to start AI video production"
             }
+
             _uiState.value = _uiState.value.copy(
                 project = project,
                 currentStage = project?.currentStage ?: PipelineStatus.IDLE,
@@ -50,11 +55,19 @@ class ProcessingController(
     fun startProcessing(projectId: String) {
         if (_uiState.value.isRunning) return
 
+        val project = _uiState.value.project
+        val isScriptMode = !project?.masterRecipeJson.isNullOrBlank()
+        val startMessage = if (isScriptMode) {
+            "Starting Master Recipe Script execution..."
+        } else {
+            "Starting sequential AI video editing pipeline..."
+        }
+
         _uiState.value = _uiState.value.copy(
             isRunning = true,
             isCancelled = false,
             errorMessage = null,
-            aiMessage = "Starting sequential AI video editing pipeline..."
+            aiMessage = startMessage
         )
 
         // Start Foreground Service for background resilience
@@ -67,11 +80,13 @@ class ProcessingController(
 
         activeJob = scope.launch {
             val result = pipeline.executePipeline(projectId) { stage, message ->
-                _uiState.value = _uiState.value.copy(
-                    currentStage = stage,
-                    aiMessage = message,
-                    currentOperationDetail = "Current stage: ${stage.name}"
-                )
+                scope.launch(Dispatchers.Main) {
+                    _uiState.value = _uiState.value.copy(
+                        currentStage = stage,
+                        aiMessage = message,
+                        currentOperationDetail = "Current stage: ${stage.name}"
+                    )
+                }
             }
 
             when (result) {
