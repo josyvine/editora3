@@ -23,4 +23,13 @@ object AppConstants {
 
     const val NOTIFICATION_CHANNEL_PROCESSING = "editora_video_processing"
     const val NOTIFICATION_ID_PROCESSING = 1001
+
+    // Cue Execution Modes (Script Mode Only)
+    const val CUE_MODE_SINGLE = "single"
+    const val CUE_MODE_MULTIPLE = "multiple"
+
+    // Concurrency Defaults & Bounds
+    const val DEFAULT_AUTO_MODE_CONCURRENCY = 1       // Auto Mode is strictly single/sequential
+    const val DEFAULT_SCRIPT_MODE_CONCURRENCY = 1     // Default fallback if omitted from JSON
+    const val MAX_SAFE_CUE_CONCURRENCY = 32           // Aligned with OkHttp maxRequestsPerHost
 }
