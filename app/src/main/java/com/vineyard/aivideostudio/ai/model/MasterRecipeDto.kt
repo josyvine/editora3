@@ -26,6 +26,7 @@ data class MasterRecipe(
     @Json(name = "editingPlan") val editingPlan: EditingPlanDto,
     @Json(name = "captions") val captions: List<RecipeCaptionDto> = emptyList(),
     @Json(name = "commentary") val commentary: RecipeCommentaryDto,
+    @Json(name = "voiceEngine") val voiceEngine: String? = null,       // Root override: "live" or "tts"
     @Json(name = "cueMode") val cueMode: String? = null,               // Root override: "single" or "multiple"
     @Json(name = "cueConcurrency") val cueConcurrency: Int? = null    // Root override: e.g. 10
 )
@@ -351,6 +352,7 @@ data class RecipeCaptionDto(
 data class RecipeCommentaryDto(
     @Json(name = "tone") val tone: String? = "Genre-adapted dynamic commentary",
     @Json(name = "voiceName") val voiceName: String? = "Puck",
+    @Json(name = "voiceEngine") val voiceEngine: String? = "live",    // "live" (Unlimited Live API) or "tts" (REST TTS)
     @Json(name = "fullScript") val fullScript: String,
     @Json(name = "segments") val segments: List<CommentarySegmentDto>? = null,
     @Json(name = "cueMode") val cueMode: String? = "single",          // "single" or "multiple"
