@@ -34,10 +34,12 @@ data class CreateUiState(
     val videoMetadata: VideoMetadata? = null,
     val targetAspectRatio: String = "ORIGINAL", // ORIGINAL, 9:16, 16:9, 1:1
     val youtubeUrl: String = "",
-    val isRecipeMode: Boolean = false, // Toggle: Auto AI vs. Master Recipe Import
+    val isRecipeMode: Boolean = false, // Toggle: Auto AI vs. Master Recipe Import (Script Mode)
     val masterRecipeJson: String = "",
     val masterRecipeFileName: String? = null,
     val parsedRecipe: MasterRecipe? = null,
+    val detectedCueMode: String = "single",      // "single" or "multiple" detected from script
+    val detectedCueConcurrency: Int = 1,        // Dynamic parallel count (e.g. 10)
     val isLoading: Boolean = false,
     val errorMessage: String? = null,
     val createdProjectId: String? = null
@@ -161,12 +163,16 @@ class CreateViewModel(
 
                 val defaultProjectName = parsed.projectInfo?.title ?: _uiState.value.projectName
                 val defaultRatio = parsed.projectInfo?.targetAspectRatio ?: _uiState.value.targetAspectRatio
+                val cueMode = parsed.cueMode ?: parsed.commentary.cueMode ?: "single"
+                val cueConcurrency = parsed.cueConcurrency ?: parsed.commentary.cueConcurrency ?: 1
 
                 _uiState.value = _uiState.value.copy(
                     isRecipeMode = true,
                     masterRecipeJson = text,
                     masterRecipeFileName = fileName,
                     parsedRecipe = parsed,
+                    detectedCueMode = cueMode,
+                    detectedCueConcurrency = cueConcurrency.coerceAtLeast(1),
                     projectName = if (_uiState.value.projectName.isBlank()) defaultProjectName else _uiState.value.projectName,
                     targetAspectRatio = defaultRatio,
                     isLoading = false,
@@ -202,12 +208,16 @@ class CreateViewModel(
 
             val defaultProjectName = parsed.projectInfo?.title ?: _uiState.value.projectName
             val defaultRatio = parsed.projectInfo?.targetAspectRatio ?: _uiState.value.targetAspectRatio
+            val cueMode = parsed.cueMode ?: parsed.commentary.cueMode ?: "single"
+            val cueConcurrency = parsed.cueConcurrency ?: parsed.commentary.cueConcurrency ?: 1
 
             _uiState.value = _uiState.value.copy(
                 isRecipeMode = true,
                 masterRecipeJson = jsonText.trim(),
                 masterRecipeFileName = "Pasted_Recipe.json",
                 parsedRecipe = parsed,
+                detectedCueMode = cueMode,
+                detectedCueConcurrency = cueConcurrency.coerceAtLeast(1),
                 projectName = if (_uiState.value.projectName.isBlank()) defaultProjectName else _uiState.value.projectName,
                 targetAspectRatio = defaultRatio,
                 errorMessage = null
