@@ -4,6 +4,7 @@ import com.vineyard.aivideostudio.core.common.AppConstants
 import com.vineyard.aivideostudio.core.result.AppError
 import com.vineyard.aivideostudio.core.util.JsonUtils
 import com.vineyard.aivideostudio.data.remote.gemini.GeminiApiService
+import okhttp3.Dispatcher
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Response
@@ -81,7 +82,14 @@ object NetworkModule {
             level = HttpLoggingInterceptor.Level.BASIC // Never log full body to avoid leaking keys/data
         }
 
+        // Configure OkHttp Dispatcher to allow high-concurrency parallel requests without host choking
+        val dispatcher = Dispatcher().apply {
+            maxRequests = 64
+            maxRequestsPerHost = 32 // Raised from default 5 to allow parallel cue batches (e.g. 10 at a time)
+        }
+
         val builder = OkHttpClient.Builder()
+            .dispatcher(dispatcher)
             .connectTimeout(60, TimeUnit.SECONDS)
             .readTimeout(60, TimeUnit.SECONDS)
             .writeTimeout(60, TimeUnit.SECONDS)
