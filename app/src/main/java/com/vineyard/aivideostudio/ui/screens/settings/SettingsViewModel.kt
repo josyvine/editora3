@@ -131,8 +131,31 @@ class SettingsViewModel(
 
     fun setModelForPurpose(purpose: ModelPurpose, model: ModelInfo) {
         viewModelScope.launch {
-            modelRepository.setSelectedModelForPurpose(purpose, model)
-            _statusMessage.value = "Assigned ${model.displayName} to ${purpose.displayName}"
+            try {
+                modelRepository.setSelectedModelForPurpose(purpose, model)
+                _statusMessage.value = "Assigned ${model.displayName} to ${purpose.displayName}"
+                _errorMessage.value = null
+            } catch (e: Exception) {
+                _errorMessage.value = "Failed to save model selection: ${e.message}"
+            }
+        }
+    }
+
+    fun setModelForPurpose(purpose: ModelPurpose, modelId: String) {
+        viewModelScope.launch {
+            try {
+                val matchingModel = uiState.value.availableModels.firstOrNull { it.id == modelId || it.id.endsWith(modelId) }
+                if (matchingModel != null) {
+                    modelRepository.setSelectedModelForPurpose(purpose, matchingModel)
+                    _statusMessage.value = "Assigned ${matchingModel.displayName} to ${purpose.displayName}"
+                } else {
+                    modelRepository.setSelectedModelForPurpose(purpose, modelId)
+                    _statusMessage.value = "Assigned $modelId to ${purpose.displayName}"
+                }
+                _errorMessage.value = null
+            } catch (e: Exception) {
+                _errorMessage.value = "Failed to save model selection: ${e.message}"
+            }
         }
     }
 
