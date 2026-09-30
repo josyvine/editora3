@@ -9,6 +9,34 @@ import com.squareup.moshi.JsonClass
  * Uses Moshi code generation matching the rest of the project.
  */
 
+enum class CardLayout {
+    @Json(name = "full_screen_slate") FULL_SCREEN_SLATE,
+    @Json(name = "floating_modal") FLOATING_MODAL
+}
+
+@JsonClass(generateAdapter = true)
+data class TextCardSpec(
+    @Json(name = "id") val id: String,
+    @Json(name = "start_time_ms") val startTimeMs: Long,
+    @Json(name = "end_time_ms") val endTimeMs: Long,
+    @Json(name = "layout") val layout: CardLayout = CardLayout.FULL_SCREEN_SLATE,
+    @Json(name = "tag") val tag: String? = null, // e.g. "INSTRUCTIONS", "SUMMARY", "TIP"
+    @Json(name = "title") val title: String,
+    @Json(name = "body_text") val bodyText: String = "",
+    @Json(name = "background_color_hex") val backgroundColorHex: String = "#101216",
+    @Json(name = "background_opacity") val backgroundOpacity: Float = 0.95f,
+    @Json(name = "accent_color_hex") val accentColorHex: String = "#4E9FFF",
+    @Json(name = "title_color_hex") val titleColorHex: String = "#FFFFFF",
+    @Json(name = "body_color_hex") val bodyColorHex: String = "#E2E8F0",
+    @Json(name = "title_font_size_sp") val titleFontSizeSp: Float = 54f,
+    @Json(name = "body_font_size_sp") val bodyFontSizeSp: Float = 36f
+) {
+    init {
+        require(startTimeMs < endTimeMs) { "startTimeMs must be less than endTimeMs" }
+        require(title.isNotBlank()) { "Card title cannot be blank" }
+    }
+}
+
 enum class BlurShape {
     @Json(name = "rectangle") RECTANGLE,
     @Json(name = "circle") CIRCLE,
@@ -112,7 +140,16 @@ enum class TrackingStyle {
     @Json(name = "red_box") RED_BOX,
     @Json(name = "highlight_circle") HIGHLIGHT_CIRCLE,
     @Json(name = "flashing_arrow") FLASHING_ARROW,
-    @Json(name = "spotlight") SPOTLIGHT
+    @Json(name = "spotlight") SPOTLIGHT,
+    @Json(name = "button_highlight") BUTTON_HIGHLIGHT,     // Pulsating corner brackets on UI buttons (e.g. "Copy" icon)
+    @Json(name = "vertical_column") VERTICAL_COLUMN        // Full-height person / athlete framing pillar
+}
+
+enum class ArrowDirection {
+    @Json(name = "up") UP,
+    @Json(name = "down") DOWN,
+    @Json(name = "left") LEFT,
+    @Json(name = "right") RIGHT
 }
 
 @JsonClass(generateAdapter = true)
@@ -128,8 +165,13 @@ data class TrackingKeyframe(
 data class TrackingIndicatorSpec(
     @Json(name = "id") val id: String,
     @Json(name = "style") val style: TrackingStyle = TrackingStyle.RED_BOX,
+    @Json(name = "arrow_direction") val arrowDirection: ArrowDirection = ArrowDirection.DOWN,
     @Json(name = "color_hex") val colorHex: String = "#FF0000",
     @Json(name = "stroke_width_px") val strokeWidthPx: Float = 6.0f,
     @Json(name = "label") val label: String? = null,
+    @Json(name = "start_time_ms") val startTimeMs: Long = 0L,
+    @Json(name = "end_time_ms") val endTimeMs: Long = Long.MAX_VALUE,
+    @Json(name = "static_bounds") val staticBounds: NormalizedBounds? = null, // For stationary targets like buttons
+    @Json(name = "dim_background_opacity") val dimBackgroundOpacity: Float = 0.0f, // 0.0 = none, 0.6 = darkens background for spotlight
     @Json(name = "keyframes") val keyframes: List<TrackingKeyframe> = emptyList()
 )
