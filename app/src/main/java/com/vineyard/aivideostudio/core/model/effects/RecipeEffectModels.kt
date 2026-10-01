@@ -173,5 +173,6 @@ data class TrackingIndicatorSpec(
     @Json(name = "end_time_ms") val endTimeMs: Long = Long.MAX_VALUE,
     @Json(name = "static_bounds") val staticBounds: NormalizedBounds? = null, // For stationary targets like buttons
     @Json(name = "dim_background_opacity") val dimBackgroundOpacity: Float = 0.0f, // 0.0 = none, 0.6 = darkens background for spotlight
-    @Json(name = "keyframes") val keyframes: List<TrackingKeyframe> = emptyList()
+    @Json(name = "keyframes") val keyframes: List<TrackingKeyframe> = emptyList(),
+    @Json(name = "tracking_mode") val trackingMode: String = "auto" // "static", "keyframes", or "auto"
 )
