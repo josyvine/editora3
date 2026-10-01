@@ -153,20 +153,45 @@ class DynamicGraphicsOverlay(
             val isWithinWindow = currentTimeMs in indicator.startTimeMs..indicator.endTimeMs
             if (!isWithinWindow) continue
 
-            // Determine target bounding rectangle (Motion Keyframe OR Static UI Bounds)
-            val rect: RectF = if (indicator.staticBounds != null) {
+            // Evaluate trackingMode: "static", "keyframes", or "auto"
+            val mode = indicator.trackingMode.lowercase()
+            val preferKeyframes = mode == "keyframes" || (mode == "auto" && indicator.keyframes.isNotEmpty())
+
+            val rect: RectF = if (preferKeyframes && indicator.keyframes.isNotEmpty()) {
+                val currentFrame = interpolateKeyframe(indicator.keyframes, currentTimeMs)
+                if (currentFrame != null) {
+                    val cx = currentFrame.x.coerceIn(0f, 1f) * canvasWidth
+                    val cy = currentFrame.y.coerceIn(0f, 1f) * canvasHeight
+                    val bw = (currentFrame.width.coerceAtLeast(0.01f) * canvasWidth)
+                    val bh = (currentFrame.height.coerceAtLeast(0.01f) * canvasHeight)
+                    RectF(cx - (bw / 2f), cy - (bh / 2f), cx + (bw / 2f), cy + (bh / 2f))
+                } else if (indicator.staticBounds != null) {
+                    // Graceful fallback to static bounds
+                    val l = minOf(indicator.staticBounds.left, indicator.staticBounds.right).coerceIn(0f, 1f) * canvasWidth
+                    val r = maxOf(indicator.staticBounds.left, indicator.staticBounds.right).coerceIn(0f, 1f) * canvasWidth
+                    val t = minOf(indicator.staticBounds.top, indicator.staticBounds.bottom).coerceIn(0f, 1f) * canvasHeight
+                    val b = maxOf(indicator.staticBounds.top, indicator.staticBounds.bottom).coerceIn(0f, 1f) * canvasHeight
+                    RectF(l, t, r, b)
+                } else {
+                    continue
+                }
+            } else if (indicator.staticBounds != null) {
+                // Static Bounds Lock (Post-scroll stationary elements)
                 val l = minOf(indicator.staticBounds.left, indicator.staticBounds.right).coerceIn(0f, 1f) * canvasWidth
                 val r = maxOf(indicator.staticBounds.left, indicator.staticBounds.right).coerceIn(0f, 1f) * canvasWidth
                 val t = minOf(indicator.staticBounds.top, indicator.staticBounds.bottom).coerceIn(0f, 1f) * canvasHeight
                 val b = maxOf(indicator.staticBounds.top, indicator.staticBounds.bottom).coerceIn(0f, 1f) * canvasHeight
                 RectF(l, t, r, b)
-            } else {
+            } else if (indicator.keyframes.isNotEmpty()) {
+                // Fallback to keyframes if staticBounds is omitted
                 val currentFrame = interpolateKeyframe(indicator.keyframes, currentTimeMs) ?: continue
                 val cx = currentFrame.x.coerceIn(0f, 1f) * canvasWidth
                 val cy = currentFrame.y.coerceIn(0f, 1f) * canvasHeight
                 val bw = (currentFrame.width.coerceAtLeast(0.01f) * canvasWidth)
                 val bh = (currentFrame.height.coerceAtLeast(0.01f) * canvasHeight)
                 RectF(cx - (bw / 2f), cy - (bh / 2f), cx + (bw / 2f), cy + (bh / 2f))
+            } else {
+                continue
             }
 
             // 1. Spotlight Dimming (Darkens background around target element)
@@ -319,7 +344,7 @@ class DynamicGraphicsOverlay(
 
         // Bottom-Right
         canvas.drawLine(r.right, r.bottom, r.right - len, r.bottom, paint)
-        canvas.drawLine(r.right, r.bottom, r.right - len, r.bottom, paint)
+        canvas.drawLine(r.right, r.bottom, r.right, r.bottom - len, paint)
     }
 
     private fun renderBackgroundDimming(
