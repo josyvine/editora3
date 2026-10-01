@@ -284,9 +284,11 @@ data class RecipeTrackingDto(
     @Json(name = "color_hex") val colorHex: String = "#FF0000",
     @Json(name = "stroke_width_px") val strokeWidthPx: Float = 6.0f,
     @Json(name = "label") val label: String? = null,
+    @Json(name = "trackingMode") val trackingMode: String? = null,      // "static", "keyframes", or "auto"
+    @Json(name = "tracking_mode") val trackingModeSnake: String? = null, // snake_case support
     @Json(name = "start_time_ms") val startTimeMs: Long = 0L,
     @Json(name = "end_time_ms") val endTimeMs: Long = Long.MAX_VALUE,
-    @Json(name = "static_bounds") val staticBounds: NormalizedBoundsDto? = null, // For highlighting stationary UI buttons (e.g. "Copy" icon)
+    @Json(name = "static_bounds") val staticBounds: NormalizedBoundsDto? = null, // For stationary UI buttons (e.g. "Copy" icon after scroll)
     @Json(name = "dim_background_opacity") val dimBackgroundOpacity: Float = 0.0f, // 0.0 = off, 0.6 = darkens background for spotlight
     @Json(name = "keyframes") val keyframes: List<RecipeKeyframeDto> = emptyList()
 ) {
@@ -305,6 +307,8 @@ data class RecipeTrackingDto(
             "right" -> ArrowDirection.RIGHT
             else -> ArrowDirection.DOWN
         }
+        val resolvedMode = trackingMode ?: trackingModeSnake ?: "auto"
+
         return TrackingIndicatorSpec(
             id = id ?: "track_ind_${index}_${System.currentTimeMillis()}",
             style = trackingStyle,
@@ -316,7 +320,8 @@ data class RecipeTrackingDto(
             endTimeMs = endTimeMs,
             staticBounds = staticBounds?.toNormalizedBounds(),
             dimBackgroundOpacity = dimBackgroundOpacity.coerceIn(0.0f, 1.0f),
-            keyframes = keyframes.map { it.toTrackingKeyframe() }
+            keyframes = keyframes.map { it.toTrackingKeyframe() },
+            trackingMode = resolvedMode
         )
     }
 }
